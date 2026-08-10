@@ -1,0 +1,357 @@
+---
+title: "Immune_phenotypes_Front2026"
+author: "Ibukun J. Abulude"
+date: "2026-08-10"
+output: html_document
+---
+
+
+# Caries Prevalence
+
+```{r}
+
+###############
+# =========================================================
+# Dental caries distribution across salivary immune phenotypes
+# HUU + HEU + HI
+# =========================================================
+
+library(tidyverse)
+
+# =========================================================
+# 1. Combine metadata from all groups
+# =========================================================
+
+caries_all <- bind_rows(
+  
+  meta_sub_HUU %>%
+    mutate(Group = "HUU"),
+  
+  meta_sub_HEU %>%
+    mutate(Group = "HEU"),
+  
+  meta_sub_HI %>%
+    mutate(Group = "HI")
+  
+)
+
+
+# Check structure
+table(caries_all$Group)
+table(caries_all$Group, caries_all$Mclust_cluster)
+table(caries_all$Group, caries_all$caries_IL)
+
+caries_all$Group <- factor(caries_all$Group, levels = c("HUU", "HEU", "HI"))
+
+
+# =========================================================
+# 2. Phenotype-specific caries prevalence table
+# =========================================================
+#
+# Prevalence:
+# caries-positive children within each phenotype /
+# total children in that phenotype
+#
+# Also calculate:
+# proportion of all caries cases contributed by phenotype
+# =========================================================
+
+caries_summary <- caries_all %>%
+  
+  group_by(
+    Group,
+    Mclust_cluster
+  ) %>%
+  
+  summarise(
+    
+    n_phenotype = n(),
+    
+    caries_cases = sum(
+      caries_IL == 1,
+      na.rm = TRUE
+    ),
+    
+    no_caries = sum(
+      caries_IL == 0,
+      na.rm = TRUE
+    ),
+    
+    prevalence_percent =
+      100 * caries_cases / n_phenotype,
+    
+    .groups = "drop"
+    
+  ) %>%
+  
+  group_by(Group) %>%
+  
+  mutate(
+    
+    total_caries_group =
+      sum(caries_cases),
+    
+    proportion_of_group_caries_percent =
+      100 * caries_cases /
+      total_caries_group
+    
+  ) %>%
+  
+  ungroup() %>%
+  
+  mutate(
+    
+    prevalence_percent =
+      round(prevalence_percent, 1),
+    
+    proportion_of_group_caries_percent =
+      round(
+        proportion_of_group_caries_percent,
+        1
+      )
+    
+  )
+
+
+# View final table
+caries_summary
+
+caries_summary <- data.frame(caries_summary)
+caries_summary
+
+# =========================================================
+# 3. Save/export table
+# =========================================================
+
+#write.csv(
+ # caries_summary,
+  #"caries_distribution_by_saliva_phenotype.csv",
+  #row.names = FALSE
+#)
+
+
+
+# =========================================================
+# Plot: phenotype-specific caries prevalence
+# Groups together on X-axis
+# =========================================================
+
+caries_prev_plot <- ggplot(
+  caries_summary,
+  aes(
+    x = Group,
+    y = prevalence_percent,
+    fill = factor(Mclust_cluster)
+  )
+) +
+  
+  geom_col(
+    position = position_dodge(width = 0.8),
+    width = 0.7
+  ) +
+  
+  geom_text(
+    aes(
+      label = paste0(
+        caries_cases,
+        "/",
+        n_phenotype,
+        "\n(",
+        prevalence_percent,
+        "%)"
+      )
+    ),
+    position = position_dodge(width = 0.8),
+    vjust = -0.35,
+    size = 3.5
+  ) +
+  
+  scale_fill_manual(
+    values = c(
+      "1" = "#D73027",
+      "2" = "#2C7BB6",
+      "3" = "#1B9E77"
+    ),
+    labels = c(
+      "1" = "S1",
+      "2" = "S2",
+      "3" = "S3"
+    ),
+    name = "Salivary immune phenotype"
+  ) +
+  
+  scale_y_continuous(
+    limits = c(
+      0,
+      max(
+        caries_summary$prevalence_percent,
+        na.rm = TRUE
+      ) * 1.25
+    ),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  
+  theme_classic(
+    base_size = 14
+  ) +
+  
+  labs(
+    title = "Dental caries prevalence across salivary immune phenotypes",
+    x = "HIV exposure/infection group",
+    y = "Caries prevalence (%)"
+  ) +
+  
+  theme(
+    
+    axis.text.x = element_text(
+      color = "black"
+    ),
+    
+    axis.text.y = element_text(
+      color = "black"
+    ),
+    
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold",
+      size = 16
+    ),
+    
+    legend.position = "top"
+  )
+
+
+caries_prev_plot
+
+
+
+# =========================================================
+# 5. Optional: plot distribution of all caries cases
+# =========================================================
+#
+# Answers:
+# "Where are the caries-positive children located?"
+#
+# Different question from prevalence
+# =========================================================
+
+# =========================================================
+# Plot: distribution of caries cases across phenotypes
+# Groups together on X-axis
+# =========================================================
+
+caries_case_distribution_plot <- ggplot(
+  caries_summary,
+  aes(
+    x = Group,
+    y = proportion_of_group_caries_percent,
+    fill = factor(Mclust_cluster)
+  )
+) +
+  
+  geom_col(
+    position = position_dodge(width = 0.8),
+    width = 0.7
+  ) +
+  
+  geom_text(
+    aes(
+      label = paste0(
+        caries_cases,
+        " cases"
+      )
+    ),
+    position = position_dodge(width = 0.8),
+    vjust = -0.35,
+    size = 3.5
+  ) +
+  
+  scale_fill_manual(
+    values = c(
+      "1" = "#D73027",
+      "2" = "#2C7BB6",
+      "3" = "#1B9E77"
+    ),
+    labels = c(
+      "1" = "S1",
+      "2" = "S2",
+      "3" = "S3"
+    ),
+    name = "Salivary immune phenotype"
+  ) +
+  
+  scale_y_continuous(
+    limits = c(
+      0,
+      max(
+        caries_summary$proportion_of_group_caries_percent,
+        na.rm = TRUE
+      ) * 1.25
+    ),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  
+  theme_classic(
+    base_size = 14
+  ) +
+  
+  labs(
+    title =
+      "Distribution of caries cases across salivary immune phenotypes",
+    
+    x =
+      "HIV exposure/infection group",
+    
+    y =
+      "Proportion of group caries cases (%)"
+  ) +
+  
+  theme(
+    
+    axis.text.x =
+      element_text(
+        color = "black"
+      ),
+    
+    axis.text.y =
+      element_text(
+        color = "black"
+      ),
+    
+    plot.title =
+      element_text(
+        hjust = 0.5,
+        face = "bold",
+        size = 16
+      ),
+    
+    legend.position = "top"
+  )
+
+
+caries_case_distribution_plot
+
+
+###### Prevalence of caries across groups 
+
+fit_group <- glm(
+  caries_IL ~ study_group + host_age + host_sex,
+  data = caries_all,
+  family = binomial
+)
+
+summary(fit_group)
+
+exp(cbind(
+  OR = coef(fit_group),
+  confint(fit_group)
+))
+
+table(caries_all$study_group)
+
+
+```
+
+
+
+

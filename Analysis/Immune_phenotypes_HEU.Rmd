@@ -1,0 +1,1166 @@
+---
+title: "Immune_phenotypes_Front2026"
+author: "Ibukun J. Abulude"
+date: "2026-07-18"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+# Import files
+
+```{r}
+
+library(phyloseq)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(broom)
+library(vegan)
+library(Maaslin2)
+library(ANCOMBC)
+library(rstatix)
+library(ggpubr)
+library(dendextend)
+library(pheatmap)
+library(epitools)
+library(tidyverse)
+library(GGally)
+library(mclust)
+library(factoextra)
+library(ggrepel)
+library(tableone)
+library(stringr)
+library(cowplot)
+
+```
+
+
+
+# HEU saliva 
+```{r}
+# =====================================================
+# 1. SUBSET HEU
+# =====================================================
+
+physeq_HEU <- subset_samples(
+  physeq_all_389,
+  study_group == "HEU"
+)
+
+physeq_HEU <- prune_taxa(
+  taxa_sums(physeq_HEU) > 0,
+  physeq_HEU
+)
+
+# =====================================================
+# PREVALENCE FILTER
+# taxa present in >=10% samples
+# =====================================================
+
+prev_threshold <- 0.1 * nsamples(physeq_HEU)
+
+physeq_HEU <- filter_taxa(
+  physeq_HEU,
+  function(x) sum(x > 0) >= prev_threshold,
+  prune = TRUE
+)
+
+physeq_HEU <- prune_taxa(
+  taxa_sums(physeq_HEU) > 5,
+  physeq_HEU
+)
+
+physeq_HEU
+
+# =====================================================
+# 2. EXTRACT METADATA
+# =====================================================
+
+meta_HEU <- data.frame(sample_data(physeq_HEU))
+
+meta_HEU <- meta_HEU %>%
+  mutate(
+    host_age = as.numeric(host_age),
+    host_sex = as.factor(host_sex),
+    caries_IL = as.factor(caries_IL),
+    logCD4 = log10(CD4.Count.1)
+  )
+
+meta_HEU$logCD4_c <- scale(
+  meta_HEU$logCD4,
+  center = TRUE,
+  scale = FALSE
+)
+
+# =====================================================
+# 3. MATCH CYTOKINE MATRIX
+# =====================================================
+
+cytok_LLOD30 <- masaliva_LODimputed389_filt   
+
+colnames(cytok_LLOD30)
+
+cyto_HEU <- cytok_LLOD30[
+  rownames(meta_HEU),
+]
+
+# =====================================================
+# 4. LOG TRANSFORM
+# =====================================================
+
+cyto_HEU_log <- log10(cyto_HEU + 1e-5)
+
+# =====================================================
+# 5. RESIDUALIZE CYTOKINES
+# regress out age + sex
+# =====================================================
+
+cyto_resid_HEU <- apply(
+  cyto_HEU_log,
+  2,
+  function(y) {
+    fit <- lm(
+      y ~ host_age + host_sex,
+      data = meta_HEU
+    )
+    residuals(fit)
+  }
+)
+
+cyto_resid_HEU <- as.data.frame(cyto_resid_HEU)
+rownames(cyto_resid_HEU) <- rownames(meta_HEU)
+
+```
+
+
+
+
+# mclust HEU Saliva
+
+```{r}
+# =========================================================
+# Choose cytokine matrix
+# =========================================================
+
+cytok_mat <- cyto_resid_HEU
+
+# Keep shared samples only
+shared_ids <- intersect(
+  rownames(cytok_mat),
+  rownames(meta_HEU)
+)
+
+cytok_mat <- cytok_mat[shared_ids, , drop = FALSE]
+meta_sub_HEU <- meta_HEU[shared_ids, ]
+
+# -----------------------------
+# Remove non-numeric columns
+# -----------------------------
+cytok_mat <- cytok_mat %>%
+  dplyr::select(where(is.numeric))
+
+# -----------------------------
+# Remove near-zero variance variables
+# -----------------------------
+vars <- apply(
+  cytok_mat,
+  2,
+  var,
+  na.rm = TRUE
+)
+
+cytok_mat <- cytok_mat[
+  ,
+  vars > 0,
+  drop = FALSE
+]
+
+# -----------------------------
+# Scale data
+# -----------------------------
+X <- scale(cytok_mat)
+
+# =========================================================
+# PCA
+# =========================================================
+
+pca_res <- prcomp(
+  X,
+  center = TRUE,
+  scale. = TRUE
+)
+
+# Scree plot
+fviz_eig(
+  pca_res,
+  addlabels = TRUE,
+  ylim = c(0, 60)
+) +
+  ggtitle("HEU Cytokines: Scree Plot")
+
+# Variance explained
+var_explained <- pca_res$sdev^2 /
+  sum(pca_res$sdev^2)
+
+variance_df <- data.frame(
+  PC = paste0("PC", seq_along(var_explained)),
+  Variance = var_explained,
+  Cumulative = cumsum(var_explained)
+)
+
+print(variance_df)
+
+# =========================================================
+# Choose PCs for clustering
+# =========================================================
+
+n_pcs <- which(
+  cumsum(var_explained) >= 0.80
+)[1]
+
+cat("Using", n_pcs, "PCs for Mclust\n")
+
+pca_scores <- as.data.frame(
+  pca_res$x[, 1:n_pcs]
+)
+
+# =========================================================
+# Mclust
+# =========================================================
+
+mc <- Mclust(pca_scores)
+
+summary(mc)
+
+# Cluster assignments
+clusters <- factor(mc$classification)
+
+# Add to metadata
+meta_sub_HEU$Mclust_cluster <- clusters
+
+table(meta_sub_HEU$Mclust_cluster)
+
+```
+
+#Biplot HEU
+```{r}
+#----------------------------------------------------------
+# BIPLOT — HEU Saliva
+#----------------------------------------------------------
+
+# =========================================================
+# PCA dataframe
+# =========================================================
+
+pca_df <- data.frame(
+  Sample = rownames(pca_res$x),
+  PC1 = pca_res$x[, 1],
+  PC2 = pca_res$x[, 2],
+  meta_sub_HEU
+)
+
+# -----------------------------
+# PCA scores (samples)
+# -----------------------------
+scores <- as.data.frame(pca_res$x)
+scores$Cluster <- pca_df$Mclust_cluster
+
+# -----------------------------
+# PCA loadings (variables)
+# -----------------------------
+loadings <- as.data.frame(pca_res$rotation)
+
+# Scale arrows for visualization
+arrow_scale <- 3
+
+loadings$Cytokine <- rownames(loadings)
+
+# -----------------------------
+# Variance explained
+# -----------------------------
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+pc1_var <- round(100 * var_explained[1], 1)
+pc2_var <- round(100 * var_explained[2], 1)
+
+
+# -----------------------------
+# Cluster colors — HEU
+# -----------------------------
+cluster_colors <- c(
+  "1" = "#D73027",
+  "2" = "#2C7BB6"
+  # "3" = "#1B9E77"
+)
+
+
+# =========================================================
+# PCA BIPLOT
+# =========================================================
+
+p_HEU_saliva_biplot <- ggplot() +
+
+  # Samples
+  geom_point(
+    data = scores,
+    aes(PC1, PC2, color = Cluster),
+    size = 3,
+    alpha = 0.85
+  ) +
+
+  # Cluster ellipses
+  stat_ellipse(
+    data = scores,
+    aes(PC1, PC2, color = Cluster),
+    linewidth = 0.8,
+    alpha = 0.4
+  ) +
+
+  # Cytokine loading arrows
+  geom_segment(
+    data = loadings,
+    aes(
+      x = 0,
+      y = 0,
+      xend = PC1 * arrow_scale,
+      yend = PC2 * arrow_scale
+    ),
+    arrow = arrow(length = unit(0.2, "cm")),
+    color = "black",
+    alpha = 0.7
+  ) +
+
+  # Cytokine labels
+  ggrepel::geom_text_repel(
+    data = loadings,
+    aes(
+      x = PC1 * arrow_scale,
+      y = PC2 * arrow_scale,
+      label = Cytokine
+    ),
+    size = 4,
+    max.overlaps = Inf
+  ) +
+
+  # Cluster colors
+  scale_color_manual(
+    values = cluster_colors,
+    labels = c(
+      "1" = "S1",
+      "2" = "S2"
+    ),
+    name = "HEU Phenotype"
+  )  +
+
+  # Labels
+  labs(
+    # title = "PCA Biplot of saliva Cytokines in HEU",
+    x = paste0("PC1 (", pc1_var, "% variance)"),
+    y = paste0("PC2 (", pc2_var, "% variance)"),
+    color = "Cluster"
+  ) +
+
+  # Theme
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(
+      size = 18,
+      face = "bold",
+      hjust = 0.5
+    ),
+    axis.title.x = element_text(
+      size = 16,
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      size = 16,
+      face = "bold"
+    ),
+    axis.text = element_text(size = 13),
+    legend.title = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    legend.text = element_text(size = 12)
+  )
+
+
+# Display plot
+p_HEU_saliva_biplot
+
+```
+
+#Box plot HEU
+```{r}
+# =========================================================
+# Prepare dataframe
+# =========================================================
+
+plot_df <- cytok_mat %>%
+  as.data.frame() %>%
+  mutate(
+    Cluster = clusters,
+    Sample = rownames(cytok_mat)
+  )
+
+
+# =========================================================
+# Convert to long format
+# =========================================================
+
+plot_long <- plot_df %>%
+  pivot_longer(
+    cols = -c(Cluster, Sample),
+    names_to = "Cytokine",
+    values_to = "Value"
+  )
+
+
+# =========================================================
+# Create saliva phenotype labels
+# 1 = S1, 2 = S2
+# =========================================================
+
+plot_long$Phenotype <- factor(
+  plot_long$Cluster,
+  levels = c("1", "2"),
+  labels = c("S1", "S2")
+)
+
+table(plot_long$Phenotype)
+
+
+# =========================================================
+# Order cytokines
+# =========================================================
+
+plot_long_order <- plot_long %>%
+  mutate(
+    Cytokine = factor(
+      Cytokine,
+      levels = c(
+        #"Saliva_IL1_alpha", # not significant; excluded for even figure panel
+        "Saliva_IL8",
+        "Saliva_MCP1",
+        "Saliva_IFN_gamma",
+        "Saliva_IL4",
+        "Saliva_IL5",
+        "Saliva_IL6"
+      )
+    )
+  )
+
+
+# =========================================================
+# Wilcoxon tests
+# =========================================================
+
+pairwise_df <- plot_long_order %>%
+  group_by(Cytokine) %>%
+  wilcox_test(
+    Value ~ Phenotype
+  ) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance("p.adj") %>%
+  add_xy_position(x = "Phenotype")
+
+
+# =========================================================
+# Colors
+# =========================================================
+
+phenotype_colors <- c(
+  "S1" = "#D73027",
+  "S2" = "#2C7BB6"
+)
+
+
+# =========================================================
+# Plot each cytokine
+# =========================================================
+
+cytokine_order <- levels(plot_long_order$Cytokine)
+
+p_list <- lapply(cytokine_order, function(cyt) {
+
+  subdf <- plot_long_order %>%
+    filter(Cytokine == cyt)
+
+  pair_sub <- pairwise_df %>%
+    filter(Cytokine == cyt)
+
+  ggplot(
+    subdf,
+    aes(
+      x = Phenotype,
+      y = Value,
+      fill = Phenotype
+    )
+  ) +
+
+    geom_boxplot(
+      width = 0.35,
+      alpha = 0.85,
+      outlier.shape = NA
+    ) +
+
+    geom_jitter(
+      aes(color = Phenotype),
+      width = 0.12,
+      size = 1.5,
+      alpha = 0.7
+    ) +
+
+    stat_pvalue_manual(
+      pair_sub,
+      label = "p.adj.signif",
+      tip.length = 0.01,
+      size = 4
+    ) +
+
+    scale_fill_manual(values = phenotype_colors) +
+    scale_color_manual(values = phenotype_colors) +
+
+    theme_classic(base_size = 13) +
+
+    labs(
+      title = gsub("Saliva_", "", cyt),
+      x = NULL,
+      y = NULL
+    ) +
+
+    theme(
+      legend.position = "none",
+      plot.title = element_text(
+        hjust = 0.5,
+        size = 12,
+        face = "bold"
+      ),
+      plot.margin = margin(10, 10, 10, 10)
+    )
+})
+
+
+# =========================================================
+# Combine
+# =========================================================
+
+final_plot_saliva_HEU <- wrap_plots(
+  p_list,
+  ncol = 3
+) +
+  plot_annotation(
+    # title = "Saliva Cytokine Levels Across Phenotypes in HEU"
+  )
+
+
+final_plot_saliva_HEU
+
+# =========================================================
+# Add global axis labels
+# =========================================================
+
+box_HEU_saliva_2 <- ggdraw(final_plot_saliva_HEU) +
+  draw_label(
+    "HEU Phenotype",
+    x = 0.5,
+    y = 0.005,
+    vjust = 0
+  ) +
+  draw_label(
+    "Log10 cytokine level (age- and sex-adjusted)",
+    x = 0.0,
+    y = 0.5,
+    angle = 90,
+    vjust = 1
+  )
+
+box_HEU_saliva_2
+
+
+```
+
+# Significant and effect sizes HEU saliva
+
+```{r}
+# =========================================================
+# Pairwise Wilcoxon tests (BH-adjusted)
+# =========================================================
+
+pairwise_df <- plot_long_order %>%
+  group_by(Cytokine) %>%
+  pairwise_wilcox_test(
+    Value ~ Cluster,
+    p.adjust.method = "BH"
+  ) %>%
+  ungroup()
+
+# =========================================================
+# Rank-biserial effect sizes for each pairwise comparison
+# =========================================================
+
+eff12 <- plot_long_order %>%
+  filter(Cluster %in% c("1", "2")) %>%
+  group_by(Cytokine) %>%
+  wilcox_effsize(Value ~ Cluster) %>%
+  mutate(
+    group1 = "1",
+    group2 = "2"
+  ) %>%
+  ungroup()
+
+eff13 <- plot_long_order %>%
+  filter(Cluster %in% c("1", "3")) %>%
+  group_by(Cytokine) %>%
+  wilcox_effsize(Value ~ Cluster) %>%
+  mutate(
+    group1 = "1",
+    group2 = "3"
+  ) %>%
+  ungroup()
+
+eff23 <- plot_long_order %>%
+  filter(Cluster %in% c("2", "3")) %>%
+  group_by(Cytokine) %>%
+  wilcox_effsize(Value ~ Cluster) %>%
+  mutate(
+    group1 = "2",
+    group2 = "3"
+  ) %>%
+  ungroup()
+
+effect_df <- bind_rows(
+  eff12,
+  eff13,
+  eff23
+) %>%
+  select(
+    Cytokine,
+    group1,
+    group2,
+    effsize,
+    magnitude
+  )
+
+# =========================================================
+# Merge Wilcoxon results with effect sizes
+# =========================================================
+
+wilcox_effect_table <- pairwise_df %>%
+  left_join(
+    effect_df,
+    by = c("Cytokine", "group1", "group2")
+  ) %>%
+  mutate(
+    statistic = round(statistic, 1),
+    p = signif(p, 3),
+    p.adj = signif(p.adj, 3),
+    effsize = round(effsize, 3)
+  ) %>%
+  select(
+    Cytokine,
+    group1,
+    group2,
+    n1,
+    n2,
+    statistic,
+    p,
+    p.adj,
+    p.adj.signif,
+    effsize,
+    magnitude
+  ) %>%
+  arrange(
+    Cytokine,
+    group1,
+    group2
+  )
+
+# =========================================================
+# Display
+# =========================================================
+
+print(wilcox_effect_table)
+
+# Optional data frame for export
+wilcox_effect_table_df <- as.data.frame(wilcox_effect_table)
+
+wilcox_effect_table_df
+
+```
+
+#Beta diversity  HUU saliva
+
+```{r}
+# =========================================================
+# Create phyloseq object with HUU cluster assignments
+# =========================================================
+
+if (!taxa_are_rows(physeq_HUU)) {
+  physeq_HUU <- t(physeq_HUU)
+}
+
+physeq_HUU
+
+physeq_HUU_clust <- physeq_HUU
+
+# ---------------------------------------------------------
+# Metadata formatting
+# ---------------------------------------------------------
+meta_sub_HUU$Mclust_cluster <- factor(meta_sub_HUU$Mclust_cluster)
+meta_sub_HUU$caries_IL <- factor(meta_sub_HUU$caries_IL)
+meta_sub_HUU$host_sex <- factor(meta_sub_HUU$host_sex)
+rownames(meta_sub_HUU) <- meta_sub_HUU$host_subject_id
+
+# ---------------------------------------------------------
+# Ensure sample order matches
+# ---------------------------------------------------------
+sample_data(physeq_HUU_clust) <- sample_data(meta_sub_HUU)
+
+physeq_HUU_clust
+
+# ---------------------------------------------------------
+# Extract OTU table (counts)
+# ---------------------------------------------------------
+otu <- as(otu_table(physeq_HUU_clust), "matrix")
+
+if (taxa_are_rows(physeq_HUU_clust)) {
+  otu <- t(otu)
+}
+
+otu <- as.data.frame(otu)
+
+# ---------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------
+meta <- data.frame(sample_data(physeq_HUU_clust))
+
+# ---------------------------------------------------------
+# Bray-Curtis distance
+# ---------------------------------------------------------
+otu <- otu / rowSums(otu)
+
+bray <- vegdist(
+  otu,
+  method = "bray"
+)
+
+# ---------------------------------------------------------
+# PCoA
+# ---------------------------------------------------------
+pcoa <- cmdscale(
+  bray,
+  eig = TRUE,
+  k = 2
+)
+
+var_exp <- pcoa$eig / sum(pcoa$eig[pcoa$eig > 0])
+
+pcoa_df <- data.frame(
+  PC1 = pcoa$points[, 1],
+  PC2 = pcoa$points[, 2],
+  meta
+)
+
+# ---------------------------------------------------------
+# Overall PERMANOVA
+# ---------------------------------------------------------
+set.seed(123)
+
+perm_cluster <- adonis2(
+  bray ~ Mclust_cluster +
+    caries_IL +
+    host_age +
+    host_sex +
+    logCD4_c,
+  data = meta,
+  by = "margin"
+)
+
+perm_cluster
+
+# =========================================================
+# Pairwise PERMANOVA
+# =========================================================
+
+# -------------------------
+# 1 vs 2
+# -------------------------
+phy_12 <- subset_samples(
+  physeq_HUU_clust,
+  Mclust_cluster %in% c("1", "2")
+)
+
+phy_12 <- prune_taxa(
+  taxa_sums(phy_12) > 0,
+  phy_12
+)
+
+bray_12 <- phyloseq::distance(
+  phy_12,
+  method = "bray"
+)
+
+meta_12 <- data.frame(sample_data(phy_12))
+
+set.seed(123)
+
+adonis_12 <- adonis2(
+  bray_12 ~ Mclust_cluster +
+    caries_IL +
+    host_age +
+    host_sex +
+    logCD4_c,
+  data = meta_12,
+  by = "margin"
+)
+
+# -------------------------
+# 1 vs 3
+# -------------------------
+phy_13 <- subset_samples(
+  physeq_HUU_clust,
+  Mclust_cluster %in% c("1", "3")
+)
+
+phy_13 <- prune_taxa(
+  taxa_sums(phy_13) > 0,
+  phy_13
+)
+
+bray_13 <- phyloseq::distance(
+  phy_13,
+  method = "bray"
+)
+
+meta_13 <- data.frame(sample_data(phy_13))
+
+set.seed(123)
+
+adonis_13 <- adonis2(
+  bray_13 ~ Mclust_cluster +
+    caries_IL +
+    host_age +
+    host_sex +
+    logCD4_c,
+  data = meta_13,
+  by = "margin"
+)
+
+# -------------------------
+# 2 vs 3
+# -------------------------
+phy_23 <- subset_samples(
+  physeq_HUU_clust,
+  Mclust_cluster %in% c("2", "3")
+)
+
+phy_23 <- prune_taxa(
+  taxa_sums(phy_23) > 0,
+  phy_23
+)
+
+bray_23 <- phyloseq::distance(
+  phy_23,
+  method = "bray"
+)
+
+meta_23 <- data.frame(sample_data(phy_23))
+
+set.seed(123)
+
+adonis_23 <- adonis2(
+  bray_23 ~ Mclust_cluster +
+    caries_IL +
+    host_age +
+    host_sex +
+    logCD4_c,
+  data = meta_23,
+  by = "margin"
+)
+
+adonis_12
+adonis_13
+adonis_23
+
+```
+
+
+# Betadisper HUU saliva
+
+```{r}
+# =========================================================
+# Test homogeneity of dispersion
+# =========================================================
+
+disp12 <- betadisper(
+  bray_12,
+  meta_12$Mclust_cluster
+)
+permutest(disp12)
+
+disp13 <- betadisper(
+  bray_13,
+  meta_13$Mclust_cluster
+)
+permutest(disp13)
+
+disp23 <- betadisper(
+  bray_23,
+  meta_23$Mclust_cluster
+)
+permutest(disp23)
+
+```
+
+
+#ANCOMBC HEU saliva
+
+```{r}
+# =========================================================
+# Prepare phyloseq object for ANCOM-BC2 (HEU)
+# =========================================================
+
+# Make sure taxa are rows
+if (!taxa_are_rows(physeq_HEU)) {
+  physeq_HEU <- t(physeq_HEU)
+}
+
+physeq_HEU_ancom <- physeq_HEU
+
+# ---------------------------------------------------------
+# Metadata formatting
+# ---------------------------------------------------------
+meta_sub_HEU$Mclust_cluster <- factor(meta_sub_HEU$Mclust_cluster)
+meta_sub_HEU$caries_IL <- factor(meta_sub_HEU$caries_IL)
+meta_sub_HEU$host_sex <- factor(meta_sub_HEU$host_sex)
+
+table(meta_sub_HEU$Mclust_cluster)
+
+# ---------------------------------------------------------
+# Ensure sample order matches
+# ---------------------------------------------------------
+sample_data(physeq_HEU_ancom) <- sample_data(meta_sub_HEU)
+
+physeq_HEU_ancom
+
+# =========================================================
+# Run ANCOM-BC2
+# =========================================================
+
+library(ANCOMBC)
+set.seed(123)
+
+ancom_res_HEU <- ancombc2(
+  data = physeq_HEU_ancom,
+
+  # Fixed effects
+  fix_formula = "Mclust_cluster + caries_IL + host_age + host_sex + logCD4_c",
+
+  # No random effects
+  rand_formula = NULL,
+
+  tax_level = "Species",
+  p_adj_method = "BH",
+  pseudo_sens = TRUE,
+  s0_perc = 0.05,
+
+  group = "Mclust_cluster",
+  struc_zero = TRUE,
+  neg_lb = TRUE,
+  alpha = 0.05,
+
+  iter_control = list(
+    tol = 1e-5,
+    max_iter = 100,
+    verbose = TRUE
+  ),
+
+  em_control = list(
+    tol = 1e-5,
+    max_iter = 100
+  ),
+
+  lme_control = lme4::lmerControl(),
+
+  mdfdr_control = list(
+    fwer_ctrl_method = "BH",
+    B = 1
+  ),
+
+  global = TRUE,
+  pairwise = TRUE,
+  # dunnet = TRUE,
+  trend = FALSE,
+
+  verbose = TRUE,
+  n_cl = 2
+)
+```
+
+
+
+```{r}
+
+# =========================================================
+# Extract significant taxa (HEU)
+# =========================================================
+
+mclust2_HEU_volc <- ancom_res_HEU$res %>%
+  dplyr::select(
+    taxon,
+    lfc_Mclust_cluster2,
+    q_Mclust_cluster2,
+    passed_ss_Mclust_cluster2
+  ) %>%
+  filter(
+    passed_ss_Mclust_cluster2 == TRUE
+  )
+
+
+
+caries <- ancom_res_HEU$res %>%
+  dplyr::select(
+    taxon,
+    lfc_caries_IL1,
+    q_caries_IL1,
+    passed_ss_caries_IL1
+  ) %>%
+  filter(
+    q_caries_IL1 < 0.1,
+    passed_ss_caries_IL1 == TRUE
+  ) %>%
+  arrange(lfc_caries_IL1)
+
+caries
+
+
+
+# =========================================================
+# Volcano plot
+# =========================================================
+
+# Prepare volcano plot data
+
+df_volcano_HEU <- mclust2_HEU_volc %>%
+  mutate(
+    color_group = case_when(
+      lfc_Mclust_cluster2 < 0 ~ "S1",
+      TRUE ~ "S2"
+    ),
+
+    # Clean taxon names
+    feature = taxon %>%
+      str_replace_all("_", " ") %>%
+      str_replace_all("\\bsp\\.\\b", "sp.") %>%
+      str_remove("\\s+(ATCC|DSM|str\\.|F|CS)\\s*\\d+") %>%
+      str_remove("\\s+unknown$") %>%
+      str_replace("^([A-Z][a-z]+) unknown$", "\\1 sp.") %>%
+      str_replace("sp\\. oral taxon (\\d+).*", "sp. oral taxon \\1") %>%
+      str_squish(),
+
+    # Italic labels
+    feature_label = paste0("italic('", feature, "')")
+  )
+
+
+```
+
+
+#Volcano plot HEU
+```{r}
+# =========================================================
+# Volcano plot
+# =========================================================
+
+cf_volcano_HEU_saliva <- ggplot(
+  df_volcano_HEU,
+  aes(
+    x = lfc_Mclust_cluster2,
+    y = -log10(q_Mclust_cluster2),
+    color = color_group
+  )
+) +
+
+  geom_point(
+    alpha = 0.8,
+    size = 4
+  ) +
+
+  geom_text_repel(
+    data = df_volcano_HEU %>%
+      filter(
+        q_Mclust_cluster2 < 0.1,
+        passed_ss_Mclust_cluster2
+      ),
+    aes(label = feature_label),
+    parse = TRUE,
+    color = "black",
+    size = 4,
+    max.overlaps = Inf,
+    box.padding = 0.4,
+    point.padding = 0.3,
+    segment.color = "grey50",
+    show.legend = FALSE
+  ) +
+
+  scale_color_manual(
+    values = c(
+      "S1" = "#D73027",
+      "S2" = "#2C7BB6"
+    )
+  ) +
+
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+
+  geom_hline(
+    yintercept = -log10(0.1),
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+
+  labs(
+    x = "Effect Size (Coefficient)",
+    y = expression(-log[10](q-value)),
+    color = "HEU Phenotype",
+    #title = "Differentially abundant taxa associated with saliva cytokine clusters in HEU"
+  ) +
+
+  theme_classic() +
+
+  theme(
+    legend.position = "right",
+    legend.text = element_text(size = 12),
+    plot.title = element_text(
+      size = 14,
+      face = "bold",
+      hjust = 0.5
+    ),
+    axis.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      size = 14,
+      face = "bold"
+    )
+  )
+
+
+# Display plot
+cf_volcano_HEU_saliva
+```
+
+
+

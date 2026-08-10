@@ -1,0 +1,2643 @@
+---
+title: "Immune_phenotypes_Front2026"
+author: "Ibukun J. Abulude"
+date: "2026-07-08"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+
+# Import libraries
+
+```{r}
+
+library(phyloseq)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(broom)
+library(vegan)
+library(Maaslin2)
+library(ANCOMBC)
+library(rstatix)
+library(ggpubr)
+library(dendextend)
+library(pheatmap)
+library(epitools)
+library(tidyverse)
+library(GGally)
+library(mclust)
+library(factoextra)
+library(ggrepel)
+library(tableone)
+library(stringr)
+library(cowplot)
+
+```
+
+```{r}
+# =====================================================
+# 1. SUBSET HI
+# =====================================================
+
+physeq_HI <- subset_samples(
+  physeq_all_389,
+  study_group == "HI"
+)
+
+physeq_HI <- prune_taxa(
+  taxa_sums(physeq_HI) > 0,
+  physeq_HI
+)
+
+# =====================================================
+# PREVALENCE FILTER
+# taxa present in >=10% samples
+# =====================================================
+
+prev_threshold <- 0.1 * nsamples(physeq_HI)
+
+physeq_HI <- filter_taxa(
+  physeq_HI,
+  function(x) sum(x > 0) >= prev_threshold,
+  prune = TRUE
+)
+
+physeq_HI <- prune_taxa(
+  taxa_sums(physeq_HI) > 5,
+  physeq_HI
+)
+
+physeq_HI
+
+# =====================================================
+# 2. EXTRACT METADATA
+# =====================================================
+
+meta_HI <- data.frame(sample_data(physeq_HI))
+
+meta_HI <- meta_HI %>%
+  mutate(
+    host_age = as.numeric(host_age),
+    host_sex = as.factor(host_sex),
+    caries_IL = as.factor(caries_IL),
+    logCD4 = log10(CD4.Count.1)
+  )
+
+meta_HI$logCD4_c <- scale(
+  meta_HI$logCD4,
+  center = TRUE,
+  scale = FALSE
+)
+
+# =====================================================
+# 3. MATCH CYTOKINE MATRIX
+# =====================================================
+
+cytok_LLOD30 <- masaliva_LODimputed389_filt  # substitute maplasma_LODimputed389_filt when using plasma
+
+colnames(cytok_LLOD30)
+
+cyto_HI <- cytok_LLOD30[
+  rownames(meta_HI),
+]
+
+# =====================================================
+# 4. LOG TRANSFORM
+# =====================================================
+
+cyto_HI_log <- log10(cyto_HI + 1e-5)
+
+# =====================================================
+# 5. Adjust CYTOKINES
+# for age + sex
+# =====================================================
+
+cyto_resid_HI <- apply(
+  cyto_HI_log,
+  2,
+  function(y) {
+    fit <- lm(
+      y ~ host_age + host_sex,
+      data = meta_HI
+    )
+    residuals(fit)
+  }
+)
+
+cyto_resid_HI <- as.data.frame(cyto_resid_HI)
+rownames(cyto_resid_HI) <- rownames(meta_HI)
+
+```
+
+
+# mclust HI Saliva
+```{r}
+
+# Choose cytokine matrix
+cytok_mat <- cyto_resid_HI
+
+# Keep shared samples only
+shared_ids <- intersect(rownames(cytok_mat), rownames(meta_HI))
+
+cytok_mat <- cytok_mat[shared_ids, , drop = FALSE]
+meta_sub_HI <- meta_HI[shared_ids, ]
+
+# -----------------------------
+# Remove non-numeric columns
+# -----------------------------
+cytok_mat <- cytok_mat %>%
+  dplyr::select(where(is.numeric))
+
+# -----------------------------
+# Remove near-zero variance variables
+# -----------------------------
+vars <- apply(cytok_mat, 2, var, na.rm = TRUE)
+cytok_mat <- cytok_mat[, vars > 0, drop = FALSE]
+
+# -----------------------------
+# Scale data
+# -----------------------------
+X <- scale(cytok_mat)
+
+# =========================================================
+# PCA
+# =========================================================
+
+pca_res <- prcomp(
+  X,
+  center = TRUE,
+  scale. = TRUE
+)
+
+# Scree plot
+fviz_eig(
+  pca_res,
+  addlabels = TRUE,
+  ylim = c(0, 60)
+) +
+  ggtitle("HI Cytokines: Scree Plot")
+
+# Variance explained
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+
+variance_df <- data.frame(
+  PC = paste0("PC", seq_along(var_explained)),
+  Variance = var_explained,
+  Cumulative = cumsum(var_explained)
+)
+
+print(variance_df)
+
+# =========================================================
+# Choose PCs for clustering
+# =========================================================
+
+n_pcs <- which(cumsum(var_explained) >= 0.80)[1]
+
+cat("Using", n_pcs, "PCs for Mclust\n")
+
+pca_scores <- as.data.frame(
+  pca_res$x[, 1:n_pcs]
+)
+
+# =========================================================
+# Mclust
+# =========================================================
+
+mc <- Mclust(pca_scores)
+
+summary(mc)
+
+# Cluster assignments
+clusters <- factor(mc$classification)
+
+# Add to metadata
+meta_sub_HI$Mclust_cluster <- clusters
+
+table(meta_sub_HI$Mclust_cluster)
+
+```
+
+
+
+# Biplot HI saliva
+
+```{r}
+
+#----------------------------------------------------------
+# BIPLOT
+#---------------------------------------------------------
+
+# =========================================================
+# PCA dataframe
+# =========================================================
+
+pca_df <- data.frame(
+  Sample = rownames(pca_res$x),
+  PC1 = pca_res$x[, 1],
+  PC2 = pca_res$x[, 2],
+  PC3 = pca_res$x[, 3],
+  meta_sub_HI
+)
+
+# -----------------------------
+# PCA scores (samples)
+# -----------------------------
+scores <- as.data.frame(pca_res$x)
+scores$Cluster <- pca_df$Mclust_cluster
+
+# -----------------------------
+# PCA loadings (variables)
+# -----------------------------
+loadings <- as.data.frame(pca_res$rotation)
+
+# scale arrows for visualization
+arrow_scale <- 3
+
+loadings$Cytokine <- rownames(loadings)
+
+# variance explained
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+pc1_var <- round(100 * var_explained[1], 1)
+pc2_var <- round(100 * var_explained[2], 1)
+
+cluster_colors <- c(
+  "1" = "#D73027",
+  "2" = "#2C7BB6",
+  "3" = "#1B9E77"
+)
+
+p_HI <- ggplot() +
+  geom_point(
+    data = scores,
+    aes(PC1, PC2, color = Cluster),
+    size = 3,
+    alpha = 0.85
+  ) +
+  stat_ellipse(
+    data = scores,
+    aes(PC1, PC2, color = Cluster),
+    linewidth = 0.8,
+    alpha = 0.4
+  ) +
+  geom_segment(
+    data = loadings,
+    aes(
+      x = 0,
+      y = 0,
+      xend = PC1 * arrow_scale,
+      yend = PC2 * arrow_scale
+    ),
+    arrow = arrow(length = unit(0.2, "cm")),
+    color = "black",
+    alpha = 0.7
+  ) +
+  geom_text_repel(
+    data = loadings,
+    aes(
+      x = PC1 * arrow_scale,
+      y = PC2 * arrow_scale,
+      label = Cytokine
+    ),
+    size = 4,
+    max.overlaps = Inf
+  ) +
+  scale_color_manual(
+    values = cluster_colors,
+    labels = c(
+      "1" = "S1",
+      "2" = "S2",
+      "3" = "S3"
+    ),
+    name = "HI Phenotype"
+  )  +
+  labs(
+    #title = "PCA Biplot of Saliva Cytokine Clusters in HI",
+    x = paste0("PC1 (", pc1_var, "% variance)"),
+    y = paste0("PC2 (", pc2_var, "% variance)"),
+    color = "Cluster"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    axis.title.x = element_text(size = 16, face = "bold"),
+    axis.title.y = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 13),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12)
+  )
+
+p_HI
+
+```
+
+
+# Box plot HI saliva
+```{r}
+plot_df <- cytok_mat %>%
+  as.data.frame() %>%
+  mutate(
+    Cluster = clusters,
+    Sample = rownames(cytok_mat)
+  )
+
+
+# -----------------------------
+# Convert to long format
+# -----------------------------
+plot_long <- plot_df %>%
+  pivot_longer(
+    cols = -c(Cluster, Sample),
+    names_to = "Cytokine",
+    values_to = "Value"
+  )
+
+
+# =========================================================
+# Create saliva phenotype labels
+# 1 = S1, 2 = S2, 3 = S3
+# =========================================================
+
+plot_long$Phenotype <- factor(
+  plot_long$Cluster,
+  levels = c("1", "2", "3"),
+  labels = c("S1", "S2", "S3")
+)
+
+table(plot_long$Phenotype)
+
+
+# =========================================================
+# 1. GLOBAL TEST (Kruskal-Wallis for 3 groups)
+# =========================================================
+
+kw_df <- plot_long %>%
+  group_by(Cytokine) %>%
+  kruskal_test(Value ~ Phenotype) %>%
+  adjust_pvalue(method = "fdr") %>%
+  mutate(
+    p.adj.signif = case_when(
+      p.adj < 0.001 ~ "***",
+      p.adj < 0.01  ~ "**",
+      p.adj < 0.05  ~ "*",
+      TRUE          ~ "ns"
+    )
+  )
+
+
+# =========================================================
+# Y POSITION FOR GLOBAL STARS
+# =========================================================
+
+y_pos <- plot_long %>%
+  group_by(Cytokine) %>%
+  summarise(
+    y.position = max(Value, na.rm = TRUE) * 1.10
+  )
+
+kw_df <- kw_df %>%
+  left_join(y_pos, by = "Cytokine")
+
+
+# =========================================================
+# Fixed phenotype order
+# =========================================================
+
+plot_long$Phenotype <- factor(
+  plot_long$Phenotype,
+  levels = c("S1", "S2", "S3")
+)
+
+table(plot_long$Phenotype)
+
+
+# =========================================================
+# Cytokine order
+# =========================================================
+
+plot_long_order <- plot_long %>%
+  mutate(
+    Cytokine = factor(
+      Cytokine,
+      levels = c(
+        # Inflammatory / innate
+        "Saliva_IL1_alpha",
+        "Saliva_IL8",
+        "Saliva_MCP1",
+
+        # Adaptive / Th1-Th2
+        "Saliva_IFN_gamma",
+        "Saliva_IL4",
+        "Saliva_IL5"
+        #"Saliva_IL6" # not significant, commented out to make even figure panel
+      )
+    )
+  )
+
+
+table(plot_long_order$Cytokine)
+
+
+# =========================================================
+# Pairwise Wilcoxon tests (BH-adjusted)
+# =========================================================
+
+pairwise_df <- plot_long_order %>%
+  group_by(Cytokine) %>%
+  pairwise_wilcox_test(
+    Value ~ Phenotype,
+    p.adjust.method = "BH"
+  ) %>%
+  add_xy_position(x = "Phenotype")
+
+
+# =========================================================
+# Phenotype colors
+# =========================================================
+
+phenotype_colors <- c(
+  "S1" = "#D73027",
+  "S2" = "#2C7BB6",
+  "S3" = "#1B9E77"
+)
+
+
+# =========================================================
+# PLOTS
+# =========================================================
+
+cytokine_order <- levels(plot_long_order$Cytokine)
+
+p_list <- lapply(cytokine_order, function(cyt) {
+
+  subdf <- plot_long_order %>%
+    filter(Cytokine == cyt)
+
+  pair_sub <- pairwise_df %>%
+    filter(Cytokine == cyt)
+
+
+  ggplot(
+    subdf,
+    aes(
+      x = Phenotype,
+      y = Value,
+      fill = Phenotype
+    )
+  ) +
+
+    geom_boxplot(
+      width = 0.35,
+      alpha = 0.85,
+      outlier.shape = NA
+    ) +
+
+    geom_jitter(
+      aes(color = Phenotype),
+      width = 0.12,
+      size = 1.5,
+      alpha = 0.7
+    ) +
+
+    stat_pvalue_manual(
+      pair_sub,
+      label = "p.adj.signif",
+      tip.length = 0.01,
+      size = 4
+    ) +
+
+    scale_fill_manual(
+      values = phenotype_colors
+    ) +
+
+    scale_color_manual(
+      values = phenotype_colors
+    ) +
+
+    theme_classic(base_size = 13) +
+
+    labs(
+      title = gsub("Saliva_", "", cyt),
+      x = NULL,
+      y = NULL
+    ) +
+
+    theme(
+      legend.position = "none",
+      plot.title = element_text(
+        hjust = 0.5,
+        size = 12,
+        face = "bold"
+      ),
+      plot.margin = margin(10, 10, 10, 10)
+    )
+})
+
+
+# =========================================================
+# COMBINE PLOTS
+# =========================================================
+
+# global_title <- "Saliva Cytokine Levels Across Phenotypes in HI"
+
+final_plot_HI_saliva <- wrap_plots(
+  p_list,
+  ncol = 3
+) +
+  plot_annotation(
+    # title = global_title
+  )
+
+final_plot_HI_saliva
+
+```
+
+# box plot with global axes
+```{r}
+
+final_plot_HI_saliva <- ggdraw(final_plot_HI_saliva) +
+  draw_label(
+    "HI Phenotype",
+    x = 0.5,
+    y = 0.005,
+    vjust = 0
+  ) +
+  draw_label(
+    "Log10 cytokine level (age- and sex-adjusted)",
+    x = 0.0,
+    y = 0.5,
+    angle = 90,
+    vjust = 1
+  )
+
+final_plot_HI_saliva
+
+```
+
+
+# significance and Effect size table
+
+```{r}
+# =========================================================
+# Pairwise Wilcoxon tests (BH-adjusted)
+# =========================================================
+
+pairwise_df <- plot_long_order %>%
+  group_by(Cytokine) %>%
+  pairwise_wilcox_test(
+    Value ~ Cluster,
+    p.adjust.method = "BH"
+  ) %>%
+  ungroup()
+
+# =========================================================
+# Rank-biserial effect sizes for each pairwise comparison
+# =========================================================
+
+eff12 <- plot_long_order %>%
+  filter(Cluster %in% c("1", "2")) %>%
+  group_by(Cytokine) %>%
+  wilcox_effsize(Value ~ Cluster) %>%
+  mutate(
+    group1 = "1",
+    group2 = "2"
+  ) %>%
+  ungroup()
+
+eff13 <- plot_long_order %>%
+  filter(Cluster %in% c("1", "3")) %>%
+  group_by(Cytokine) %>%
+  wilcox_effsize(Value ~ Cluster) %>%
+  mutate(
+    group1 = "1",
+    group2 = "3"
+  ) %>%
+  ungroup()
+
+eff23 <- plot_long_order %>%
+  filter(Cluster %in% c("2", "3")) %>%
+  group_by(Cytokine) %>%
+  wilcox_effsize(Value ~ Cluster) %>%
+  mutate(
+    group1 = "2",
+    group2 = "3"
+  ) %>%
+  ungroup()
+
+effect_df <- bind_rows(
+  eff12,
+  eff13,
+  eff23
+) %>%
+  select(
+    Cytokine,
+    group1,
+    group2,
+    effsize,
+    magnitude
+  )
+
+# =========================================================
+# Merge Wilcoxon results with effect sizes
+# =========================================================
+
+wilcox_effect_table <- pairwise_df %>%
+  left_join(
+    effect_df,
+    by = c("Cytokine", "group1", "group2")
+  ) %>%
+  mutate(
+    statistic = round(statistic, 1),
+    p = signif(p, 3),
+    p.adj = signif(p.adj, 3),
+    effsize = round(effsize, 3)
+  ) %>%
+  select(
+    Cytokine,
+    group1,
+    group2,
+    n1,
+    n2,
+    statistic,
+    p,
+    p.adj,
+    p.adj.signif,
+    effsize,
+    magnitude
+  ) %>%
+  arrange(
+    Cytokine,
+    group1,
+    group2
+  )
+
+# =========================================================
+# Display
+# =========================================================
+
+print(wilcox_effect_table)
+
+# Optional data frame for export
+wilcox_effect_table_df <- as.data.frame(wilcox_effect_table)
+
+wilcox_effect_table_df
+
+
+# Median table final use!
+## Median for direction
+
+
+median_table_wide <- plot_long %>%
+  group_by(Cytokine, Cluster) %>%
+  summarise(
+    median = median(Value, na.rm = TRUE),
+    IQR_low = quantile(Value, 0.25, na.rm = TRUE),
+    IQR_high = quantile(Value, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    median = round(median, 3),
+    IQR_low = round(IQR_low, 3),
+    IQR_high = round(IQR_high, 3),
+    Value = paste0(median, " (", IQR_low, "–", IQR_high, ")")
+  ) %>%
+  select(Cytokine, Cluster, Value) %>%
+  pivot_wider(
+    names_from = Cluster,
+    values_from = Value,
+    names_prefix = "Phenotype "
+  ) %>%
+  arrange(Cytokine)
+
+median_table_wide
+
+
+```
+
+
+
+#Beta diversity
+
+```{r}
+# =========================================================
+# Create phyloseq object with HI cluster assignments
+# =========================================================
+
+if (!taxa_are_rows(physeq_HI)) {
+  physeq_HI <- t(physeq_HI)
+}
+
+physeq_HI
+
+physeq_HI_clust <- physeq_HI
+
+# ---------------------------------------------------------
+# Metadata formatting
+# ---------------------------------------------------------
+meta_sub_HI$Mclust_cluster <- factor(meta_sub_HI$Mclust_cluster)
+meta_sub_HI$caries_IL <- factor(meta_sub_HI$caries_IL)
+meta_sub_HI$host_sex <- factor(meta_sub_HI$host_sex)
+meta_sub_HI$VL_bin <- factor(meta_sub_HI$VL_bin)
+rownames(meta_sub_HI) <- meta_sub_HI$host_subject_id
+
+
+
+# ---------------------------------------------------------
+# Ensure sample order matches
+# ---------------------------------------------------------
+sample_data(physeq_HI_clust) <- sample_data(meta_sub_HI)
+
+physeq_HI_clust
+
+# ---------------------------------------------------------
+# Extract OTU table (counts)
+# ---------------------------------------------------------
+otu <- as(otu_table(physeq_HI_clust), "matrix")
+
+if (taxa_are_rows(physeq_HI_clust)) {
+  otu <- t(otu)
+}
+
+otu <- data.frame(otu)
+
+dim(otu)
+
+# ---------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------
+meta <- data.frame(sample_data(physeq_HI_clust))
+
+# ---------------------------------------------------------
+# Bray-Curtis distance
+# ---------------------------------------------------------
+otu <- otu / rowSums(otu)
+
+bray <- vegdist(
+  otu,
+  method = "bray"
+)
+
+# ---------------------------------------------------------
+# PCoA
+# ---------------------------------------------------------
+pcoa <- cmdscale(
+  bray,
+  eig = TRUE,
+  k = 2
+)
+
+var_exp <- pcoa$eig / sum(pcoa$eig[pcoa$eig > 0])
+
+pcoa_df <- data.frame(
+  PC1 = pcoa$points[, 1],
+  PC2 = pcoa$points[, 2],
+  meta
+)
+
+# ---------------------------------------------------------
+# Overall PERMANOVA
+# ---------------------------------------------------------
+set.seed(123)
+
+
+perm_cluster <- adonis2(
+  bray ~Mclust_cluster +
+    caries_IL +
+    host_age +
+    host_sex +
+    logCD4_c +
+    #viral_load_binary +
+    VL_bin +
+    therapy_binary,
+  data = meta,
+  by = "margin"
+)
+
+perm_cluster
+
+# =========================================================
+# Pairwise PERMANOVA
+# =========================================================
+
+# -------------------------
+# 1 vs 2
+# -------------------------
+phy_12 <- subset_samples(
+  physeq_HI_clust,
+  Mclust_cluster %in% c("1", "2")
+)
+
+phy_12 <- prune_taxa(
+  taxa_sums(phy_12) > 0,
+  phy_12
+)
+
+bray_12 <- phyloseq::distance(
+  phy_12,
+  method = "bray"
+)
+
+meta_12 <- data.frame(sample_data(phy_12))
+
+set.seed(123)
+adonis_12 <- adonis2(
+  bray_12 ~Mclust_cluster +
+    caries_IL +
+    host_age +
+    host_sex +
+    logCD4_c +
+    VL_bin +
+    therapy_binary,
+  data = meta_12,
+  by = "margin"
+)
+
+# -------------------------
+# 1 vs 3
+# -------------------------
+phy_13 <- subset_samples(
+  physeq_HI_clust,
+  Mclust_cluster %in% c("1", "3")
+)
+
+phy_13 <- prune_taxa(
+  taxa_sums(phy_13) > 0,
+  phy_13
+)
+
+bray_13 <- phyloseq::distance(
+  phy_13,
+  method = "bray"
+)
+
+meta_13 <- data.frame(sample_data(phy_13))
+
+set.seed(123)
+
+adonis_13 <- adonis2(
+  bray_13 ~ Mclust_cluster +
+    caries_IL +
+    host_age +
+    host_sex +
+    logCD4_c +
+    VL_bin +
+    therapy_binary,
+  data = meta_13,
+  by = "margin"
+)
+
+# -------------------------
+# 2 vs 3
+# -------------------------
+phy_23 <- subset_samples(
+  physeq_HI_clust,
+  Mclust_cluster %in% c("2", "3")
+)
+
+phy_23 <- prune_taxa(
+  taxa_sums(phy_23) > 0,
+  phy_23
+)
+
+bray_23 <- phyloseq::distance(
+  phy_23,
+  method = "bray"
+)
+
+meta_23 <- data.frame(sample_data(phy_23))
+
+set.seed(123)
+
+adonis_23 <- adonis2(
+  bray_23 ~ Mclust_cluster +
+    caries_IL +
+    host_age +
+    host_sex +
+    logCD4_c +
+    VL_bin +
+    therapy_binary,
+  data = meta_23,
+  by = "margin"
+)
+
+adonis_12
+adonis_13
+adonis_23
+
+```
+
+
+# Betadisper HI saliva
+```{r}
+# =========================================================
+# Homogeneity of multivariate dispersion
+# =========================================================
+
+disp12 <- betadisper(bray_12, meta_12$Mclust_cluster)
+permutest(disp12)
+
+disp13 <- betadisper(bray_13, meta_13$Mclust_cluster)
+permutest(disp13)
+
+disp23 <- betadisper(bray_23, meta_23$Mclust_cluster)
+permutest(disp23)
+
+```
+# Plot Beta diversity saliva HI 
+```{r}
+
+# =====================================================
+# 1. Bray-Curtis PCoA
+# =====================================================
+
+# Relative abundance
+ps_rel <- transform_sample_counts(
+  physeq_HI_clust,
+  function(x) x / sum(x)
+)
+
+# Bray distance
+bray <- phyloseq::distance(
+  ps_rel,
+  method = "bray"
+)
+
+# PCoA
+ord <- ordinate(
+  ps_rel,
+  method = "PCoA",
+  distance = bray
+)
+
+# Extract coordinates
+coords <- as.data.frame(ord$vectors[, 1:2])
+
+# Add sample metadata
+plot_df <- cbind(
+  coords,
+  as.data.frame(sample_data(ps_rel))
+)
+
+# Rename axes with % variance
+axis1 <- round(100 * ord$values$Relative_eig[1], 1)
+axis2 <- round(100 * ord$values$Relative_eig[2], 1)
+
+
+# =====================================================
+# 2. Pairwise PERMANOVA p-values
+# =====================================================
+
+pairwise_p <- data.frame(
+  group1 = c("S1", "S1", "S2"),
+  group2 = c("S2", "S3", "S3"),
+  p = c(
+    0.022,
+    0.020,
+    0.589
+  )
+)
+
+pairwise_p$label <- paste0(
+  pairwise_p$group1,
+  " vs ",
+  pairwise_p$group2,
+  ": p=",
+  formatC(
+    pairwise_p$p,
+    format = "f",
+    digits = 3
+  )
+)
+
+
+# =====================================================
+# Calculate centroids
+# =====================================================
+
+centroids <- plot_df %>%
+  group_by(Mclust_cluster) %>%
+  summarise(
+    Axis.1 = mean(Axis.1),
+    Axis.2 = mean(Axis.2)
+  )
+
+# Merge centroid coordinates back to samples
+plot_df_spider <- plot_df %>%
+  left_join(
+    centroids,
+    by = "Mclust_cluster",
+    suffix = c("", "_centroid")
+  )
+
+
+# =====================================================
+# Calculate centroids and spider lines
+# =====================================================
+
+centroids <- plot_df %>%
+  group_by(Mclust_cluster) %>%
+  summarise(
+    centroid_x = mean(Axis.1),
+    centroid_y = mean(Axis.2)
+  )
+
+
+plot_df_spider <- plot_df %>%
+  left_join(
+    centroids,
+    by = "Mclust_cluster"
+  )
+
+
+# =====================================================
+# Plot with spider lines + centroids
+# =====================================================
+
+dmm_cols <- c(
+  "1" = "#D73027",
+  "2" = "#2C7BB6",
+  "3" = "#1B9E77"
+)
+
+
+p <- ggplot(
+  plot_df_spider,
+  aes(
+    Axis.1,
+    Axis.2,
+    color = Mclust_cluster
+  )
+) +
+
+  # spider lines to centroid
+  geom_segment(
+    aes(
+      xend = centroid_x,
+      yend = centroid_y
+    ),
+    linewidth = 0.5,
+    alpha = 0.35
+  ) +
+
+  # samples
+  geom_point(
+    size = 3,
+    alpha = 0.8
+  ) +
+
+  # centroids
+  geom_point(
+    data = centroids,
+    aes(
+      x = centroid_x,
+      y = centroid_y,
+      fill = Mclust_cluster
+    ),
+    shape = 21,
+    color = "black",
+    size = 6,
+    stroke = 1.2
+  ) +
+
+  # centroid labels
+  geom_text(
+    data = centroids,
+    aes(
+      x = centroid_x,
+      y = centroid_y,
+      label = paste0("S", Mclust_cluster)
+    ),
+    color = "black",
+    vjust = -1.2,
+    size = 4
+  ) +
+
+  stat_ellipse(
+    aes(group = Mclust_cluster),
+    level = 0.95,
+    linewidth = 1
+  ) +
+
+  scale_color_manual(
+    values = dmm_cols,
+    labels = c(
+      "1" = "S1",
+      "2" = "S2",
+      "3" = "S3"
+    ),
+    name = "HI Phenotype"
+  ) +
+
+  scale_fill_manual(
+    values = dmm_cols,
+    labels = c(
+      "1" = "S1",
+      "2" = "S2",
+      "3" = "S3"
+    ),
+    name = "HI Phenotype"
+  ) +
+
+  theme_bw() +
+
+  labs(
+    # title = "Beta diversity of cytokine-defined immune phenotypes in HI",
+    x = paste0("PCoA1 (", axis1, "%)"),
+    y = paste0("PCoA2 (", axis2, "%)")
+  ) +
+
+  theme(
+    legend.position = "right",
+    plot.title = element_text(
+      hjust = 0.5
+    ),
+    axis.text = element_text(
+      size = 12
+    ),
+    axis.title = element_text(
+      size = 12
+    )
+  )
+
+
+p
+
+
+# =====================================================
+# Add PERMANOVA results
+# =====================================================
+
+p <- p +
+  annotate(
+    "text",
+    x = Inf,
+    y = Inf,
+    hjust = 1.1,
+    vjust = 1.2,
+    label =
+      "PERMANOVA:\nS1 vs S2: p=0.022\nS1 vs S3: p=0.020\nS2 vs S3: p=0.589",
+    size = 4
+  )
+
+
+p
+
+```
+```{r}
+ot <- data.frame(otu_table(physeq_HI))
+```
+
+
+
+#ANCOMBC HI saliva
+
+```{r}
+
+
+# make sure taxa are rows
+if (!taxa_are_rows(physeq_HI)) {
+  physeq_HI <- t(physeq_HI)
+}
+
+physeq_HI_ancom <- physeq_HI
+# ---------------------------------------------------------
+# metadata formatting
+# ---------------------------------------------------------
+meta_sub_HI$Mclust_cluster <- factor(meta_sub_HI$Mclust_cluster)
+meta_sub_HI$caries_IL <- factor(meta_sub_HI$caries_IL)
+meta_sub_HI$host_sex <- factor(meta_sub_HI$host_sex)
+
+# ---------------------------------------------------------
+# ensure sample order matches
+# ---------------------------------------------------------
+sample_data(physeq_HI_ancom) <- sample_data(meta_sub_HI)
+
+
+set.seed(123)
+
+# Run ANCOM-BC 
+ancom_res_HI_saliva <- ancombc2(
+  data = physeq_HI_ancom,
+  
+  # Fixed effects    
+  fix_formula = "Mclust_cluster + caries_IL  +  host_age + host_sex + VL_bin + therapy_binary + logCD4_c",  
+  
+  # No random effects
+  rand_formula = NULL,
+  
+  tax_level = "Species",
+  p_adj_method = "BH",
+  pseudo_sens = TRUE,
+  s0_perc = 0.05,
+  
+  group = "Mclust_cluster", 
+  struc_zero = TRUE,
+  neg_lb = TRUE,
+  alpha = 0.05,
+  
+  iter_control = list(
+    tol = 1e-5,
+    max_iter = 100,
+    verbose = TRUE
+  ),
+  em_control = list(
+    tol = 1e-5,
+    max_iter = 100
+  ),
+  lme_control = lme4::lmerControl(),
+  
+  mdfdr_control = list(fwer_ctrl_method = "BH", B = 1),
+  
+  global = TRUE,
+  pairwise = TRUE,
+  dunnet = TRUE,
+  trend = FALSE,
+  
+  verbose = TRUE,
+  n_cl = 2
+)
+
+
+mclust3 <- ancom_res_HI_saliva$res %>% dplyr::select(taxon,  lfc_Mclust_cluster3, 
+                                             q_Mclust_cluster3,passed_ss_Mclust_cluster3,) %>% 
+filter( passed_ss_Mclust_cluster3 == TRUE) 
+
+
+
+mclust2 <- ancom_res_HI_saliva$res %>% dplyr::select(taxon, lfc_Mclust_cluster2, 
+                                           q_Mclust_cluster2,passed_ss_Mclust_cluster2) %>% filter(passed_ss_Mclust_cluster2 == TRUE)
+
+
+caries <- ancom_res_HI_saliva$res %>% dplyr::select(taxon, 
+                                          lfc_caries_IL1, 
+                                          q_caries_IL1, 
+                                          passed_ss_caries_IL1) %>% filter(q_caries_IL1 < 0.1 , passed_ss_caries_IL1 == TRUE) %>% arrange (lfc_caries_IL1)
+
+
+
+
+mclust2_use <- mclust2%>% select( taxon, lfc_Mclust_cluster2,q_Mclust_cluster2 ,
+                                  passed_ss_Mclust_cluster2 ) %>%filter(q_Mclust_cluster2 < 0.1, passed_ss_Mclust_cluster2 == TRUE ) %>% arrange(lfc_Mclust_cluster2) 
+
+
+mclust3_use <- mclust3%>% select( taxon, lfc_Mclust_cluster3,q_Mclust_cluster3, ,
+                                  passed_ss_Mclust_cluster3)  %>% filter(q_Mclust_cluster3 < 0.1, passed_ss_Mclust_cluster3 == TRUE ) %>% arrange(lfc_Mclust_cluster3)
+
+mclust2_use
+mclust3_use
+
+```
+
+
+# volcano HI saliva
+
+```{r}
+
+# Volcano 1 
+#2 vs 1
+
+##### Volcano plot: all points shown, only significant taxa labeled
+
+df_volcano <- mclust2
+
+# ---- Prepare data ----
+df_volcano <- df_volcano %>%
+  mutate(
+    color_group = case_when(
+      lfc_Mclust_cluster2 < 0 ~ "S1",
+      TRUE ~ "S2"
+    ),
+    
+    # Clean taxon names
+    feature = taxon %>%
+      str_replace_all("_", " ") %>%
+      str_replace_all("\\bsp\\.\\b", "sp.") %>%
+      str_remove("\\s+(ATCC|DSM|str\\.|F|CS)\\s*\\d+") %>%
+      str_remove("\\s+unknown$") %>%
+      str_replace("^([A-Z][a-z]+) unknown$", "\\1 sp.") %>%
+      str_replace("sp\\. oral taxon (\\d+).*", "sp. oral taxon \\1") %>%
+      str_squish(),
+    
+    # Italic labels for plotting
+    feature_label = paste0("italic('", feature, "')")
+  )
+
+# ---- Volcano plot ----
+cf_volcano_2_1 <- ggplot(
+  df_volcano,
+  aes(
+    x = lfc_Mclust_cluster2,
+    y = -log10(q_Mclust_cluster2),
+    color = color_group
+  )
+) +
+  
+  # Plot all taxa
+  geom_point(alpha = 0.8, size = 4) +
+  
+  # Label only taxa meeting criteria
+  geom_text_repel(
+    data = df_volcano %>%
+      filter(
+        q_Mclust_cluster2 < 0.1,
+        passed_ss_Mclust_cluster2 == TRUE
+      ),
+    aes(label = feature_label),
+    parse = TRUE,
+    color = "black",
+    size = 4,
+    max.overlaps = Inf,
+    box.padding = 0.4,
+    point.padding = 0.3,
+    segment.color = "grey50",
+    show.legend = FALSE
+  ) +
+  
+  # Colors
+  scale_color_manual(
+    values = c(
+      "S1" =  "#D73027", #"#2C7BB6",
+      "S2" =  "#2C7BB6" # "#FDAE61"
+    )
+  ) +
+  
+  # Reference lines
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  geom_hline(
+    yintercept = -log10(0.1),
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  
+  # Labels
+  labs(
+    x = "Effect Size (Coefficient)",
+    y = expression(-log[10](q-value)),
+    color = "HI Phenotype" #,
+    #title = "Differentially abundant taxa associated with saliva cytokine clusters2 in HI"
+  ) +
+  
+  # Theme
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(size = 12),
+    plot.title = element_text(
+      size = 14,
+      face = "bold",
+      hjust = 0.5
+    ),
+    axis.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.text.y = element_text(
+      size = 14
+    ),
+    axis.title.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      size = 14,
+      face = "bold"
+    )
+  )
+
+# ---- Plot ----
+cf_volcano_2_1
+
+
+
+# Volcano2,   
+#3 vs 1
+
+##### Volcano plot: all points shown, only significant taxa labeled
+
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(stringr)
+
+df_volcano <- mclust3
+
+# ---- Prepare data ----
+df_volcano <- df_volcano %>%
+  mutate(
+    color_group = case_when(
+      lfc_Mclust_cluster3 < 0 ~ "S1",
+      TRUE ~ "S3"
+    ),
+    
+    # Clean taxon names
+    feature = taxon %>%
+      str_replace_all("_", " ") %>%
+      str_replace_all("\\bsp\\.\\b", "sp.") %>%
+      str_remove("\\s+(ATCC|DSM|str\\.|F|CS)\\s*\\d+") %>%
+      str_remove("\\s+unknown$") %>%
+      str_replace("^([A-Z][a-z]+) unknown$", "\\1 sp.") %>%
+      str_replace("sp\\. oral taxon (\\d+).*", "sp. oral taxon \\1") %>%
+      str_squish(),
+    
+    # Italic labels for plotting
+    feature_label = paste0("italic('", feature, "')")
+  )
+
+# ---- Volcano plot ----
+cf_volcano_3_1 <- ggplot(
+  df_volcano,
+  aes(
+    x = lfc_Mclust_cluster3,
+    y = -log10(q_Mclust_cluster3),
+    color = color_group
+  )
+) +
+  
+  # Plot all taxa
+  geom_point(alpha = 0.8, size = 4) +
+  
+  # Label only taxa meeting criteria
+  geom_text_repel(
+    data = df_volcano %>%
+      filter(
+        q_Mclust_cluster3 < 0.1,
+        passed_ss_Mclust_cluster3 == TRUE
+      ),
+    aes(label = feature_label),
+    parse = TRUE,
+    color = "black",
+    size = 4,
+    max.overlaps = Inf,
+    box.padding = 0.4,
+    point.padding = 0.3,
+    segment.color = "grey50",
+    show.legend = FALSE
+  ) +
+  
+  # Colors
+  scale_color_manual(
+    values = c(
+      "S1" =  "#D73027", #"#2C7BB6",
+      "S3" =  "#1B9E77" # "#FDAE61"
+    )
+  ) +
+  
+  # Reference lines
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  geom_hline(
+    yintercept = -log10(0.1),
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  
+  # Labels
+  labs(
+    x = "Effect Size (Coefficient)",
+    y = expression(-log[10](q-value)),
+    color = "HI Phenotype" #,
+    #title = "Differentially abundant taxa associated with saliva cytokine clusters3 in HI"
+  ) +
+  
+  # Theme
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(size = 12),
+    plot.title = element_text(
+      size = 14,
+      face = "bold",
+      hjust = 0.5
+    ),
+    axis.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.text.y = element_text(
+      size = 14
+    ),
+    axis.title.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      size = 14,
+      face = "bold"
+    )
+  )
+
+# ---- Plot ----
+
+
+cf_volcano_3_1
+
+
+```
+
+
+# PLASMA
+
+# Plasma HI
+
+```{r}
+# =====================================================
+# 1. SUBSET HI
+# =====================================================
+
+physeq_HI <- subset_samples(
+  physeq_all_389,
+  study_group == "HI"
+)
+
+physeq_HI <- prune_taxa(
+  taxa_sums(physeq_HI) > 0,
+  physeq_HI
+)
+
+# =====================================================
+# PREVALENCE FILTER
+# taxa present in >=10% samples
+# =====================================================
+
+prev_threshold <- 0.1 * nsamples(physeq_HI)
+
+physeq_HI <- filter_taxa(
+  physeq_HI,
+  function(x) sum(x > 0) >= prev_threshold,
+  prune = TRUE
+)
+
+physeq_HI <- prune_taxa(
+  taxa_sums(physeq_HI) > 5,
+  physeq_HI
+)
+
+physeq_HI
+
+# =====================================================
+# 2. EXTRACT METADATA
+# =====================================================
+
+meta_HI <- data.frame(sample_data(physeq_HI))
+
+meta_HI <- meta_HI %>%
+  mutate(
+    host_age = as.numeric(host_age),
+    host_sex = as.factor(host_sex),
+    caries_IL = as.factor(caries_IL),
+    logCD4 = log10(CD4.Count.1)
+  )
+
+meta_HI$logCD4_c <- scale(
+  meta_HI$logCD4,
+  center = TRUE,
+  scale = FALSE
+)
+
+# =====================================================
+# 3. MATCH CYTOKINE MATRIX
+# =====================================================
+
+cytok_LLOD30 <- maplasma_LODimputed389_filt  # substitute maplasma_LODimputed389_filt when using plasma
+
+colnames(cytok_LLOD30)
+
+cyto_HI <- cytok_LLOD30[
+  rownames(meta_HI),
+]
+
+# =====================================================
+# 4. LOG TRANSFORM
+# =====================================================
+
+cyto_HI_log <- log10(cyto_HI + 1e-5)
+
+# =====================================================
+# 5. ADJUST CYTOKINES
+# for age + sex
+# =====================================================
+
+cyto_resid_HI <- apply(
+  cyto_HI_log,
+  2,
+  function(y) {
+    fit <- lm(
+      y ~ host_age + host_sex,
+      data = meta_HI
+    )
+    residuals(fit)
+  }
+)
+
+cyto_resid_HI <- as.data.frame(cyto_resid_HI)
+rownames(cyto_resid_HI) <- rownames(meta_HI)
+
+```
+
+
+# mclust HI plasma
+```{r}
+
+# Choose cytokine matrix
+cytok_mat <- cyto_resid_HI
+
+# Keep shared samples only
+shared_ids <- intersect(rownames(cytok_mat), rownames(meta_HI))
+
+cytok_mat <- cytok_mat[shared_ids, , drop = FALSE]
+meta_sub_HI <- meta_HI[shared_ids, ]
+
+# -----------------------------
+# Remove non-numeric columns
+# -----------------------------
+cytok_mat <- cytok_mat %>%
+  dplyr::select(where(is.numeric))
+
+# -----------------------------
+# Remove near-zero variance variables
+# -----------------------------
+vars <- apply(cytok_mat, 2, var, na.rm = TRUE)
+cytok_mat <- cytok_mat[, vars > 0, drop = FALSE]
+
+# -----------------------------
+# Scale data
+# -----------------------------
+X <- scale(cytok_mat)
+
+# =========================================================
+# PCA
+# =========================================================
+
+pca_res <- prcomp(
+  X,
+  center = TRUE,
+  scale. = TRUE
+)
+
+# Scree plot
+fviz_eig(
+  pca_res,
+  addlabels = TRUE,
+  ylim = c(0, 60)
+) +
+  ggtitle("HI Cytokines: Scree Plot")
+
+# Variance explained
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+
+variance_df <- data.frame(
+  PC = paste0("PC", seq_along(var_explained)),
+  Variance = var_explained,
+  Cumulative = cumsum(var_explained)
+)
+
+print(variance_df)
+
+# =========================================================
+# Choose PCs for clustering
+# =========================================================
+
+n_pcs <- which(cumsum(var_explained) >= 0.80)[1]
+
+cat("Using", n_pcs, "PCs for Mclust\n")
+
+pca_scores <- as.data.frame(
+  pca_res$x[, 1:n_pcs]
+)
+
+# =========================================================
+# Mclust
+# =========================================================
+
+mc <- Mclust(pca_scores)
+
+summary(mc)
+
+# Cluster assignments
+clusters <- factor(mc$classification)
+
+# Add to metadata
+meta_sub_HI$Mclust_cluster <- clusters
+
+table(meta_sub_HI$Mclust_cluster)
+
+```
+
+
+
+# Biplot HI plasma
+
+```{r}
+
+#----------------------------------------------------------
+# BIPLOT
+#----------------------------------------------------------
+
+# =========================================================
+# PCA dataframe
+# =========================================================
+
+pca_df <- data.frame(
+  Sample = rownames(pca_res$x),
+  PC1 = pca_res$x[, 1],
+  PC2 = pca_res$x[, 2],
+  meta_sub_HI
+)
+
+# -----------------------------
+# PCA scores (samples)
+# -----------------------------
+scores <- as.data.frame(pca_res$x)
+scores$Cluster <- pca_df$Mclust_cluster
+
+# -----------------------------
+# PCA loadings (variables)
+# -----------------------------
+loadings <- as.data.frame(pca_res$rotation)
+
+# scale arrows for visualization
+arrow_scale <- 3
+
+loadings$Cytokine <- rownames(loadings)
+
+# variance explained
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+pc1_var <- round(100 * var_explained[1], 1)
+pc2_var <- round(100 * var_explained[2], 1)
+
+cluster_colors <- c(
+  "1" = "#D73027",
+  "2" = "#2C7BB6"#,
+  #"3" = "#1B9E77"
+)
+
+p_HI_plasma_biplot <- ggplot() +
+  geom_point(
+    data = scores,
+    aes(PC1, PC2, color = Cluster),
+    size = 3,
+    alpha = 0.85
+  ) +
+  stat_ellipse(
+    data = scores,
+    aes(PC1, PC2, color = Cluster),
+    linewidth = 0.8,
+    alpha = 0.4
+  ) +
+  geom_segment(
+    data = loadings,
+    aes(
+      x = 0,
+      y = 0,
+      xend = PC1 * arrow_scale,
+      yend = PC2 * arrow_scale
+    ),
+    arrow = arrow(length = unit(0.2, "cm")),
+    color = "black",
+    alpha = 0.7
+  ) +
+  geom_text_repel(
+    data = loadings,
+    aes(
+      x = PC1 * arrow_scale,
+      y = PC2 * arrow_scale,
+      label = Cytokine
+    ),
+    size = 4,
+    max.overlaps = Inf
+  ) +
+  scale_color_manual(
+    values = cluster_colors,
+    labels = c(
+      "1" = "P1",
+      "2" = "P2"
+    ),
+    name = "HI Phenotype"
+  )  +
+  labs(
+    #title = "PCA Biplot of Plasma Cytokine Clusters in HI",
+    x = paste0("PC1 (", pc1_var, "% variance)"),
+    y = paste0("PC2 (", pc2_var, "% variance)"),
+    color = "Cluster"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    axis.title.x = element_text(size = 16, face = "bold"),
+    axis.title.y = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 13),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12)
+  )
+
+p_HI_plasma_biplot
+
+```
+
+# Box plot HI plasma
+
+```{r}
+# =========================================================
+# Prepare dataframe
+# =========================================================
+
+plot_df <- cytok_mat %>%
+  as.data.frame() %>%
+  mutate(
+    Cluster = clusters,
+    Sample = rownames(cytok_mat)
+  )
+
+
+# =========================================================
+# Convert to long format
+# =========================================================
+
+plot_long <- plot_df %>%
+  pivot_longer(
+    cols = -c(Cluster, Sample),
+    names_to = "Cytokine",
+    values_to = "Value"
+  )
+
+
+# =========================================================
+# Create plasma phenotype labels
+# 1 = P1, 2 = P2
+# =========================================================
+
+plot_long$Phenotype <- factor(
+  plot_long$Cluster,
+  levels = c("1", "2"),
+  labels = c("P1", "P2")
+)
+
+table(plot_long$Phenotype)
+
+
+# =========================================================
+# Pairwise Wilcoxon tests (BH-adjusted)
+# =========================================================
+
+pairwise_df <- plot_long %>%
+  group_by(Cytokine) %>%
+  pairwise_wilcox_test(
+    Value ~ Phenotype,
+    p.adjust.method = "BH"
+  ) %>%
+  add_xy_position(x = "Phenotype")
+
+
+# =========================================================
+# Plasma phenotype colors
+# =========================================================
+
+phenotype_colors <- c(
+  "P1" = "#D73027",
+  "P2" = "#2C7BB6"
+)
+
+
+# =========================================================
+# Plot each cytokine
+# =========================================================
+
+cytokine_order <- unique(plot_long$Cytokine)
+
+p_list <- lapply(cytokine_order, function(cyt) {
+
+  subdf <- plot_long %>%
+    filter(Cytokine == cyt)
+
+  pair_sub <- pairwise_df %>%
+    filter(Cytokine == cyt)
+
+  ggplot(
+    subdf,
+    aes(
+      x = Phenotype,
+      y = Value,
+      fill = Phenotype
+    )
+  ) +
+
+    geom_boxplot(
+      width = 0.35,
+      alpha = 0.85,
+      outlier.shape = NA
+    ) +
+
+    geom_jitter(
+      aes(color = Phenotype),
+      width = 0.12,
+      size = 1.5,
+      alpha = 0.7
+    ) +
+
+    stat_pvalue_manual(
+      pair_sub,
+      label = "p.adj.signif",
+      tip.length = 0.01,
+      size = 4
+    ) +
+
+    scale_fill_manual(values = phenotype_colors) +
+    scale_color_manual(values = phenotype_colors) +
+
+    theme_classic(base_size = 13) +
+
+    labs(
+      title = gsub("Plasma_", "", cyt),
+      x = NULL,
+      y = NULL
+    ) +
+
+    theme(
+      legend.position = "none",
+      plot.title = element_text(
+        hjust = 0.5,
+        size = 12,
+        face = "bold"
+      ),
+      plot.margin = margin(10, 10, 10, 10)
+    )
+})
+
+
+# =========================================================
+# Combine plots
+# =========================================================
+
+final_plot_plasma_HI <- wrap_plots(
+  p_list,
+  ncol = 3
+) +
+  plot_annotation(
+    # title = "Plasma Cytokine Levels Across Phenotypes in HI"
+  ) &
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+
+final_plot_plasma_HI
+
+
+# =========================================================
+# Add global axis labels
+# =========================================================
+
+library(cowplot)
+
+box_plasma_HI <- ggdraw(final_plot_plasma_HI) +
+  draw_label(
+    "HI Phenotype",
+    x = 0.5,
+    y = 0.005,
+    vjust = 0
+  ) +
+  draw_label(
+    "Log10 cytokine level (age- and sex-adjusted)",
+    x = 0.0,
+    y = 0.5,
+    angle = 90,
+    vjust = 1
+  )
+
+
+box_plasma_HI
+```
+
+#Beta diversity plasma
+
+```{r}
+# =========================================================
+# Create phyloseq object with HI plasma cluster assignments
+# =========================================================
+
+if (!taxa_are_rows(physeq_HI)) {
+  physeq_HI <- t(physeq_HI)
+}
+
+physeq_HI
+
+physeq_HI_clust <- physeq_HI
+
+# ---------------------------------------------------------
+# Metadata formatting
+# ---------------------------------------------------------
+meta_sub_HI$Mclust_cluster <- factor(meta_sub_HI$Mclust_cluster)
+meta_sub_HI$caries_IL <- factor(meta_sub_HI$caries_IL)
+meta_sub_HI$host_sex <- factor(meta_sub_HI$host_sex)
+meta_sub_HI$VL_bin <- factor(meta_sub_HI$VL_bin)
+rownames(meta_sub_HI) <- meta_sub_HI$host_subject_id
+
+
+# ---------------------------------------------------------
+# Ensure sample order matches
+# ---------------------------------------------------------
+sample_data(physeq_HI_clust) <- sample_data(meta_sub_HI)
+
+physeq_HI_clust
+
+# ---------------------------------------------------------
+# Extract OTU table (counts)
+# ---------------------------------------------------------
+otu <- as(otu_table(physeq_HI_clust), "matrix")
+
+if (taxa_are_rows(physeq_HI_clust)) {
+  otu <- t(otu)
+}
+
+otu <- as.data.frame(otu)
+
+# ---------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------
+meta <- data.frame(sample_data(physeq_HI_clust))
+
+# ---------------------------------------------------------
+# Bray-Curtis distance
+# ---------------------------------------------------------
+otu <- otu / rowSums(otu)
+
+bray <- vegdist(
+  otu,
+  method = "bray"
+)
+
+# ---------------------------------------------------------
+# PCoA
+# ---------------------------------------------------------
+pcoa <- cmdscale(
+  bray,
+  eig = TRUE,
+  k = 2
+)
+
+var_exp <- pcoa$eig / sum(pcoa$eig[pcoa$eig > 0])
+
+pcoa_df <- data.frame(
+  PC1 = pcoa$points[, 1],
+  PC2 = pcoa$points[, 2],
+  meta
+)
+
+# ---------------------------------------------------------
+# Overall PERMANOVA
+# ---------------------------------------------------------
+set.seed(123)
+
+perm_cluster <- adonis2(
+  bray ~ Mclust_cluster +
+    caries_IL +
+    host_age +
+    host_sex +
+    logCD4_c +
+    #viral_load_binary +
+    VL_bin +
+    therapy_binary,
+  data = meta,
+  by = "margin"
+)
+
+perm_cluster
+```
+
+#ANCOMBC HI PLASMA
+
+```{r}
+
+# make sure taxa are rows
+if (!taxa_are_rows(physeq_HI)) {
+  physeq_HI <- t(physeq_HI)
+}
+
+physeq_HI_ancom <- physeq_HI
+# ---------------------------------------------------------
+# metadata formatting
+# ---------------------------------------------------------
+meta_sub_HI$Mclust_cluster <- factor(meta_sub_HI$Mclust_cluster)
+meta_sub_HI$caries_IL <- factor(meta_sub_HI$caries_IL)
+meta_sub_HI$host_sex <- factor(meta_sub_HI$host_sex)
+
+# ---------------------------------------------------------
+# ensure sample order matches
+# ---------------------------------------------------------
+sample_data(physeq_HI_ancom) <- sample_data(meta_sub_HI)
+
+
+set.seed(123)
+
+# Run ANCOM-BC 
+ancom_res_HI_plasma <- ancombc2( 
+  data = physeq_HI_ancom,
+  
+  fix_formula = "Mclust_cluster + caries_IL  +  host_age + host_sex + VL_bin + therapy_binary + logCD4_c",  
+  
+  # No random effects
+  rand_formula = NULL,
+  
+  tax_level = "Species",
+  p_adj_method = "BH",
+  pseudo_sens = TRUE,
+  s0_perc = 0.05,
+  
+  group = "Mclust_cluster", #caries_IL
+  struc_zero = TRUE,
+  neg_lb = TRUE,
+  alpha = 0.05,
+  
+  iter_control = list(
+    tol = 1e-5,
+    max_iter = 100,
+    verbose = TRUE
+  ),
+  em_control = list(
+    tol = 1e-5,
+    max_iter = 100
+  ),
+  lme_control = lme4::lmerControl(),
+  
+  mdfdr_control = list(fwer_ctrl_method = "BH", B = 1),
+  
+  global = TRUE,
+  pairwise = TRUE,
+  dunnet = TRUE,
+  trend = FALSE,
+  
+  verbose = TRUE,
+  n_cl = 2
+)
+
+
+mclust2 <- ancom_res_HI_plasma$res %>% dplyr::select(taxon, lfc_Mclust_cluster2, 
+                                           q_Mclust_cluster2,passed_ss_Mclust_cluster2) %>% filter(                                            passed_ss_Mclust_cluster2 == TRUE) 
+
+
+caries <- ancom_res_HI_plasma$res %>% dplyr::select(taxon, 
+                                lfc_caries_IL1, q_caries_IL1, passed_ss_caries_IL1) %>%                                         filter(q_caries_IL1 < 0.1 , passed_ss_caries_IL1 == TRUE) %>% arrange (lfc_caries_IL1)
+
+
+
+mclust2_use <- mclust2%>% select( taxon, lfc_Mclust_cluster2,q_Mclust_cluster2 ,
+                                  passed_ss_Mclust_cluster2 ) %>%filter(q_Mclust_cluster2 < 0.1,                                        passed_ss_Mclust_cluster2 == TRUE ) %>% arrange(lfc_Mclust_cluster2) 
+
+
+
+```
+
+
+
+
+```{r}
+
+# Volcano 1 
+#2 vs 1
+
+
+#####
+##### Volcano plot: all points shown, only significant taxa labeled
+
+df_volcano <- mclust2
+
+# ---- Prepare data ----
+df_volcano <- df_volcano %>%
+  mutate(
+    color_group = case_when(
+      lfc_Mclust_cluster2 < 0 ~ "P1",
+      TRUE ~ "P2"
+    ),
+    
+    # Clean taxon names
+    feature = taxon %>%
+      str_replace_all("_", " ") %>%
+      str_replace_all("\\bsp\\.\\b", "sp.") %>%
+      str_remove("\\s+(ATCC|DSM|str\\.|F|CS)\\s*\\d+") %>%
+      str_remove("\\s+unknown$") %>%
+      str_replace("^([A-Z][a-z]+) unknown$", "\\1 sp.") %>%
+      str_replace("sp\\. oral taxon (\\d+).*", "sp. oral taxon \\1") %>%
+      str_squish(),
+    
+    # Italic labels for plotting
+    feature_label = paste0("italic('", feature, "')")
+  )
+
+# ---- Volcano plot ----
+cf_volcano_HI_plasma <- ggplot(
+  df_volcano,
+  aes(
+    x = lfc_Mclust_cluster2,
+    y = -log10(q_Mclust_cluster2),
+    color = color_group
+  )
+) +
+  
+  # Plot all taxa
+  geom_point(alpha = 0.8, size = 4) +
+  
+  # Label only taxa meeting criteria
+  geom_text_repel(
+    data = df_volcano %>%
+      filter(
+        q_Mclust_cluster2 < 0.1,
+        passed_ss_Mclust_cluster2 == TRUE
+      ),
+    aes(label = feature_label),
+    parse = TRUE,
+    color = "black",
+    size = 4,
+    max.overlaps = Inf,
+    box.padding = 0.4,
+    point.padding = 0.3,
+    segment.color = "grey50",
+    show.legend = FALSE
+  ) +
+  
+  # Colors
+  scale_color_manual(
+    values = c(
+      "P1" =  "#D73027", #"#2C7BB6",
+      "P2" =  "#2C7BB6" # "#FDAE61"
+    )
+  ) +
+  
+  # Reference lines
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  geom_hline(
+    yintercept = -log10(0.1),
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  
+  # Labels
+  labs(
+    x = "Effect Size (Coefficient)",
+    y = expression(-log[10](q-value)),
+    color = "HI Phenotype" #,
+    #title = "Differentially abundant taxa associated with saliva cytokine clusters2 in HI"
+  ) +
+  
+  # Theme
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(size = 12),
+    plot.title = element_text(
+      size = 14,
+      face = "bold",
+      hjust = 0.5
+    ),
+    axis.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.text.y = element_text(
+      size = 14
+    ),
+    axis.title.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      size = 14,
+      face = "bold"
+    )
+  )
+
+# ---- Plot ----
+cf_volcano_HI_plasma
+
+
+```
+
+
+# Saliva and plasma concordance heatmap
+
+```{r}
+
+# contingency table
+table(meta_HI_saliva_mclust$Mclust_cluster , meta_HI_plasma_mclust$Mclust_cluster)
+
+cont_df <- meta_HI_saliva_mclust %>%
+  select(host_subject_id, Saliva = Mclust_cluster) %>%
+  inner_join(
+    meta_HI_plasma_mclust %>%
+      select(host_subject_id, Plasma = Mclust_cluster),
+    by = "host_subject_id"
+  ) %>%
+  dplyr::count(Saliva, Plasma) %>%
+  group_by(Saliva) %>%
+  mutate(percent = n / sum(n) * 100)
+
+cont_df
+
+# heatmap
+sal_vs_plas_concord_HI <- ggplot(cont_df,
+       aes(x = factor(Plasma),
+           y = factor(Saliva),
+           fill = percent)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = paste0(n, "\n(", round(percent,1), "%)")),
+            size = 5) +
+  scale_fill_gradient(
+    low = "white",
+    high = "#B2182B"
+  ) +
+  theme_classic() +
+  labs(
+    #title = "Saliva vs Plasma Immune Phenotype Concordance in HI",
+    x = "HI Plasma immune phenotype",
+    y = "HI Saliva immune phenotype",
+    fill = "% within saliva phenotype"
+  ) + 
+  theme(axis.text.x = element_text(size = 14, color = "black"),
+        axis.text.y = element_text(size = 14, color = "black"),
+        axis.title.x = element_text(size = 16, face = "bold"),
+        axis.title.y = element_text(size = 16, face = "bold"),
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        legend.title = element_text(size = 14, face = "bold"),
+        legend.text = element_text(size = 12))
+
+sal_vs_plas_concord_HI
+
+
+```
+
+
+
+
+
+
+# mclust clinical association
+
+```{r}
+# ================================
+# Continuous variables
+# ================================
+
+# Age
+age_test_HI <- kruskal_test(
+  meta_sub_HI,
+  host_age ~ Mclust_cluster
+)
+
+age_test_HI
+
+
+# ================================
+# Categorical variables (descriptive)
+# ================================
+
+# Sex
+sex_table_HI <- table(
+  meta_sub_HI$Mclust_cluster,
+  meta_sub_HI$host_sex
+)
+
+sex_test_HI <- fisher.test(sex_table_HI)
+sex_test_HI
+
+# Caries
+caries_table_HI <- table(
+  meta_sub_HI$Mclust_cluster,
+  meta_sub_HI$caries_IL
+)
+
+caries_test_HI <- fisher.test(caries_table_HI)
+caries_test_HI
+
+
+# Viral load category
+VL_bin_HI <- table(
+  meta_sub_HI$Mclust_cluster,
+  meta_sub_HI$VL_bin
+)
+
+VL_bin_HI <- fisher.test(VL_bin_HI)
+VL_bin_HI
+
+# Therapy status
+therapy_table_HI <- table(
+  meta_sub_HI$Mclust_cluster,
+  meta_sub_HI$therapy_binary
+)
+
+therapy_test_HI <- fisher.test(therapy_table_HI)
+
+# Display unadjusted tests
+age_test_HI
+sex_test_HI
+caries_test_HI
+viral_test_HI
+therapy_test_HI
+
+
+#Adjusted tests
+# =========================================================
+# Relevel cluster (Cluster 3 as reference)
+# =========================================================
+
+meta_sub_HI_ <- meta_sub_HI
+
+meta_sub_HI_$Mclust_cluster <- factor(
+  meta_sub_HI_$Mclust_cluster,
+  levels = c("3", "1", "2")
+)
+# =========================================================
+# Fit linear regression
+# =========================================================
+
+fit_cd4_adj <- lm(
+  logCD4 ~ Mclust_cluster + host_age + host_sex + caries_IL + VL_bin,
+  data = meta_sub_HI_
+)
+
+summary(fit_cd4_adj)
+
+# Estimated differences with 95% CI
+cd4_effects <- cbind(
+  Estimate = coef(fit_cd4_adj),
+  confint(fit_cd4_adj)
+)
+
+cd4_effects
+
+# =========================================================
+# Logistic regression models
+# =========================================================
+
+# -------------------------------
+# Caries
+# -------------------------------
+set.seed(123)
+fit_caries_HI <- glm(
+  caries_IL ~ Mclust_cluster +
+    host_age +
+    host_sex +
+    VL_bin +
+    therapy_binary +
+    logCD4_c,
+  data = meta_sub_HI_,
+  family = binomial
+)
+
+summary(fit_caries_HI)
+
+exp(cbind(
+  OR = coef(fit_caries_HI),
+  confint(fit_caries_HI)
+))
+
+
+# -------------------------------
+# Sex
+# -------------------------------
+
+meta_sub_HI$host_sex <- factor(
+  meta_sub_HI$host_sex
+)
+
+fit_sex_HI <- glm(
+  host_sex ~ Mclust_cluster +
+    host_age +
+    viral_load_binary +
+    therapy_binary +
+    logCD4_c,
+  data = meta_sub_HI,
+  family = binomial
+)
+
+summary(fit_sex_HI)
+
+exp(cbind(
+  OR = coef(fit_sex_HI),
+  confint(fit_sex_HI)
+))
+
+
+# -------------------------------
+# Viral load category
+# -------------------------------
+
+fit_viral_HI <- glm(
+  VL_bin ~ Mclust_cluster + 
+    host_age +
+    host_sex +
+    therapy_binary +
+    logCD4_c,
+  data = meta_sub_HI,
+  family = binomial
+)
+
+summary(fit_viral_HI)
+
+exp(cbind(
+  OR = coef(fit_viral_HI),
+  confint(fit_viral_HI)
+))
+
+
+# -------------------------------
+# Therapy status
+# -------------------------------
+
+fit_therapy_HI <- glm(
+  therapy_binary ~ Mclust_cluster +
+    host_age +
+    host_sex +
+    VL_bin +
+    logCD4_c,
+  data = meta_sub_HI,
+  family = binomial
+)
+
+summary(fit_therapy_HI)
+
+exp(cbind(
+  OR = coef(fit_therapy_HI),
+  confint(fit_therapy_HI)
+))
+
+```
+
+
+
+# concordance metric, Adjusted Rand Index
+
+```{r}
+# =========================================================
+# Match subjects with saliva and plasma clusters (HI)
+# =========================================================
+
+cluster_compare_HI <- meta_HI_saliva_mclust %>%
+  select(
+    host_subject_id,
+    Saliva_cluster = Mclust_cluster
+  ) %>%
+  inner_join(
+    meta_HI_plasma_mclust %>%
+      select(
+        host_subject_id,
+        Plasma_cluster = Mclust_cluster
+      ),
+    by = "host_subject_id"
+  )
+
+
+# =========================================================
+# Contingency table
+# =========================================================
+
+cluster_table_HI <- table(
+  cluster_compare_HI$Saliva_cluster,
+  cluster_compare_HI$Plasma_cluster
+)
+
+cluster_table_HI
+
+
+# =========================================================
+# Adjusted Rand Index (primary concordance measure)
+# =========================================================
+
+ARI_HI <- adjustedRandIndex(
+  cluster_compare_HI$Saliva_cluster,
+  cluster_compare_HI$Plasma_cluster
+)
+
+ARI_HI
+
+
+
+
+```
+#Table 1
+```{r}
+
+### Table 1
+meta_sub_HI$Stop_BstFed <- as.numeric(meta_sub_HI$Stop_BstFed)
+
+CreateTableOne(
+  vars = c("host_age", "CD4.Count.1", "ARV.DURATION_Months", "Stop_BstFed"),
+  data = meta_sub_HI
+)
+
+```
+
