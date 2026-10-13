@@ -1,0 +1,4699 @@
+---
+title: "Untitled"
+author: "Ibukun J. Abulude"
+output: "Pooled clusrtering analysis_Front2026"
+date: "2026-09-24"
+---
+
+
+```{r}
+library(nnet)
+library(dplyr)
+```
+
+# 
+
+```{r}
+# =====================================================
+# 1. All participants
+# =====================================================
+
+physeq_all_389 <- prune_taxa(
+  taxa_sums(physeq_all_389) > 0,
+  physeq_all_389
+)
+
+physeq_all_389
+
+# =====================================================
+# PREVALENCE FILTER
+# taxa present in >=10% samples
+# =====================================================
+
+prev_threshold <- 0.1 * nsamples(physeq_all_389)
+
+physeq_all_389 <- filter_taxa(
+  physeq_all_389,
+  function(x) sum(x > 0) >= prev_threshold,
+  prune = TRUE
+)
+
+physeq_all_389
+
+
+#
+physeq_all_389 <- prune_taxa(
+  taxa_sums(physeq_all_389) > 5,
+  physeq_all_389
+)
+
+physeq_all_389 
+
+
+# =====================================================
+# 2. EXTRACT METADATA
+# =====================================================
+
+meta_389 <- data.frame(sample_data(physeq_all_389))
+
+meta_389 <- meta_389 %>%
+  mutate(
+    host_age = as.numeric(host_age),
+    host_sex = as.factor(host_sex),
+    caries_IL = as.factor(caries_IL),
+    CD4.Count.1 = as.numeric(CD4.Count.1), #,
+    viral_load_binary = as.factor(viral_load_binary),
+    therapy_binary = as.factor(therapy_binary),
+    logCD4 = as.numeric(log10(meta_389$CD4.Count.1))
+  )
+
+meta_389$logCD4_c <- scale(
+  log10(meta_389$CD4.Count.1),
+  center = TRUE,
+  scale = FALSE
+)
+# =====================================================
+# 3. MATCH CYTOKINE MATRIX
+# =====================================================
+
+colnames(masaliva_LODimputed389_filt)   #plasma #saliva
+
+cyto_389 <- masaliva_LODimputed389_filt[
+  rownames(meta_389),
+]
+
+# =====================================================
+# 4. LOG TRANSFORM
+# =====================================================
+
+cyto_389_log <- log10(cyto_389 + 1e-5)
+
+# =====================================================
+# 5. RESIDUALIZE CYTOKINES
+#    regress out age + sex
+# =====================================================
+
+cyto_resid_389 <- apply(
+  cyto_389_log,
+  2,
+  function(y) {
+    
+    fit <- lm(
+      y ~ host_age + host_sex , 
+      data = meta_389
+    )
+    
+    residuals(fit)
+  }
+)
+
+cyto_resid_389 <- as.data.frame(cyto_resid_389)
+
+rownames(cyto_resid_389) <- rownames(meta_389)
+
+```
+
+
+
+# clustering with Mclust (Saliva)
+
+```{r}
+cytok <- cyto_resid_389
+
+# keep shared samples only
+
+dim(cytok)
+dim(cyto_389_log)
+shared_ids <- intersect(rownames(cytok), rownames(meta_389))
+
+length(intersect(rownames(cytok), rownames(meta_389)))
+
+cytok <- cytok[shared_ids, ]
+meta_sub     <- meta_389[shared_ids, ]
+
+# -----------------------------
+# Remove non-numeric columns
+# -----------------------------
+cytok <- cytok %>%
+  dplyr::select(where(is.numeric))
+
+# -----------------------------
+# Remove near-zero variance vars
+# -----------------------------
+vars <- apply(cytok, 2, var, na.rm = TRUE)
+cytok <- cytok[, vars > 0]
+
+
+
+X <- scale(cytok)
+
+# =========================================================
+# PCA
+# =========================================================
+
+pca_res <- prcomp(X,
+                  center = FALSE, #TRUE,
+                  scale. = FALSE) #TRUE)
+
+# -----------------------------
+# Scree plot
+# -----------------------------
+fviz_eig(pca_res,
+         addlabels = TRUE,
+         ylim = c(0, 60)) +
+  ggtitle("Scree Plot")
+
+# -----------------------------
+# Variance explained table
+# -----------------------------
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+
+variance_df <- data.frame(
+  PC = paste0("PC", seq_along(var_explained)),
+  Variance = var_explained,
+  Cumulative = cumsum(var_explained)
+)
+
+print(variance_df)
+
+# =========================================================
+# Choose PCs for clustering
+# =========================================================
+# Example:
+# use enough PCs to explain ~80% variance
+
+n_pcs <- which(cumsum(var_explained) >= 0.8)[1]
+
+cat("Using", n_pcs, "PCs for Mclust\n")
+
+
+pca_scores <- as.data.frame(
+  pca_res$x[, 1:n_pcs]
+)
+
+#pca_scores
+# =========================================================
+# Mclust
+# =========================================================
+
+mc <- Mclust(pca_scores)
+#mc <- Mclust(cyto_HI_log)
+
+summary(mc)
+
+# cluster assignments
+clusters <- factor(mc$classification)
+clusters
+# add to metadata
+meta_sub$Mclust_cluster <- clusters
+table(meta_sub$Mclust_cluster)
+
+
+
+meta_sub_pooled$Mclust_cluster<- factor(meta_sub_pooled$Mclust_cluster, levels = c("1", "2", "3"),
+                                        labels = c("PS1", "PS2", "PS3")) 
+
+
+```
+
+
+
+
+# Association of phenotypes with HIV status
+
+```{r}
+# =========================================================
+# SALIVA
+# Adjusted for:
+#   caries_IL
+#   host_age
+#   host_sex
+#
+# BH correction is applied ONLY to study_group comparisons
+# =========================================================
+
+# ---------------------------------------------------------
+# Check distributions
+# ---------------------------------------------------------
+
+table(
+  meta_sub$Mclust_cluster,
+  meta_sub$study_group
+)
+
+# ---------------------------------------------------------
+# Set reference levels
+# ---------------------------------------------------------
+
+meta_sub_ref <- meta_sub %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "2"
+    ),
+    study_group = relevel(
+      factor(study_group),
+      ref = "HEU"
+    )
+  )
+
+levels(meta_sub_ref$Mclust_cluster)
+levels(meta_sub_ref$study_group)
+
+# ---------------------------------------------------------
+# Multinomial logistic regression
+# ---------------------------------------------------------
+
+logi_study_grp <- multinom(
+  Mclust_cluster ~ study_group +
+    #caries_IL +
+    host_age +
+    host_sex,
+  data = meta_sub_ref,
+  trace = FALSE
+)
+
+summary(logi_study_grp)
+
+# ---------------------------------------------------------
+# Extract coefficients and SEs
+# ---------------------------------------------------------
+
+s <- summary(logi_study_grp)
+
+coef <- s$coefficients
+se   <- s$standard.errors
+
+# Make sure matrices remain matrices if necessary
+coef <- as.matrix(coef)
+se   <- as.matrix(se)
+
+# ---------------------------------------------------------
+# Calculate z statistics and P-values
+# ---------------------------------------------------------
+
+z <- coef / se
+
+p <- 2 * pnorm(
+  abs(z),
+  lower.tail = FALSE
+)
+
+# ---------------------------------------------------------
+# Odds ratios and 95% CI
+# ---------------------------------------------------------
+
+OR <- exp(coef)
+
+CI_low <- exp(
+  coef - 1.96 * se
+)
+
+CI_high <- exp(
+  coef + 1.96 * se
+)
+
+# ---------------------------------------------------------
+# Create full results table
+# ---------------------------------------------------------
+
+results_all <- data.frame(
+  Comparison = rep(
+    rownames(coef),
+    each = ncol(coef)
+  ),
+  Predictor = rep(
+    colnames(coef),
+    times = nrow(coef)
+  ),
+  Estimate = as.vector(t(coef)),
+  SE = as.vector(t(se)),
+  Z = as.vector(t(z)),
+  P = as.vector(t(p)),
+  OR = as.vector(t(OR)),
+  CI_low = as.vector(t(CI_low)),
+  CI_high = as.vector(t(CI_high))
+)
+
+# ---------------------------------------------------------
+# BH correction ONLY for study_group
+# ---------------------------------------------------------
+
+results_study_group <- results_all %>%
+  filter(
+    Predictor %in% c(
+      "study_groupHI",
+      "study_groupHUU"
+    )
+  ) %>%
+  mutate(
+    P_BH = p.adjust(
+      P,
+      method = "BH"
+    )
+  )
+
+# ---------------------------------------------------------
+# Final table
+# ---------------------------------------------------------
+
+results_study_group <- results_study_group %>%
+  dplyr::select(
+    Comparison,
+    Predictor,
+    OR,
+    CI_low,
+    CI_high,
+    P,
+    P_BH
+  )
+
+results_study_group
+
+```
+
+
+
+
+```{r}
+
+library(nnet)
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+# ---------------------------------------------------------
+# Set reference levels
+# ---------------------------------------------------------
+
+meta_sub_ref <- meta_sub %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "2"
+    ),
+    study_group = relevel(
+      factor(study_group),
+      ref = "HEU"
+    ),
+    host_sex = relevel(
+      factor(host_sex),
+      ref = "F"
+    )
+  )
+
+# Check cluster labels and reference levels
+levels(meta_sub_ref$Mclust_cluster)
+levels(meta_sub_ref$study_group)
+levels(meta_sub_ref$host_sex)
+
+# ---------------------------------------------------------
+# Fit multinomial logistic regression
+# ---------------------------------------------------------
+
+logi_study_grp <- multinom(
+  Mclust_cluster ~ study_group + host_age + host_sex,
+  data = meta_sub_ref,
+  trace = FALSE
+)
+
+s <- summary(logi_study_grp)
+
+coef <- as.matrix(s$coefficients)
+se   <- as.matrix(s$standard.errors)
+
+# ---------------------------------------------------------
+# Extract all model coefficients
+# ---------------------------------------------------------
+
+z <- coef / se
+p <- 2 * pnorm(abs(z), lower.tail = FALSE)
+
+OR      <- exp(coef)
+CI_low  <- exp(coef - 1.96 * se)
+CI_high <- exp(coef + 1.96 * se)
+
+results_all <- expand.grid(
+  Predictor = colnames(coef),
+  Comparison = rownames(coef),
+  KEEP.OUT.ATTRS = FALSE,
+  stringsAsFactors = FALSE
+) %>%
+  mutate(
+    Estimate = as.vector(t(coef)),
+    SE       = as.vector(t(se)),
+    Z        = as.vector(t(z)),
+    P        = as.vector(t(p)),
+    OR       = as.vector(t(OR)),
+    CI_low   = as.vector(t(CI_low)),
+    CI_high  = as.vector(t(CI_high))
+  )
+
+
+# ---------------------------------------------------------
+# Benjamini-Hochberg correction across all model coefficients
+# ---------------------------------------------------------
+
+results_all<- results_all%>%
+  mutate(
+    P_BH = p.adjust(P, method = "BH")
+  )
+
+# ---------------------------------------------------------
+# Format final results table
+# ---------------------------------------------------------
+
+results_table <- results_all%>%
+  mutate(
+    Comparison = case_when(
+      Comparison == "1" ~ "PS1 vs PS2",
+      Comparison == "3" ~ "PS3 vs PS2",
+      TRUE ~ Comparison
+    ),
+    Predictor = recode(
+      Predictor,
+      "study_groupHI" = "HI vs HEU",
+      "study_groupHUU" = "HUU vs HEU",
+      "host_age" = "Age",
+      "host_sexM" = "Male vs Female"
+    ),
+    `95% CI` = sprintf(
+      "%.3f-%.3f",
+      CI_low,
+      CI_high
+    )
+  ) %>%
+  dplyr::select(
+    Comparison,
+    Predictor,
+    OR,
+    `95% CI`,
+    P,
+    P_BH
+  ) %>%
+  mutate(
+    OR = round(OR, 3),
+    P = signif(P, 4),
+    P_BH = signif(P_BH, 4)
+  )
+
+results_table
+
+```
+
+```{r}
+
+# ---------------------------------------------------------
+# Set PS1 and HEU as reference levels
+# ---------------------------------------------------------
+
+meta_sub_refS1_refHEU <- meta_sub %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    ),
+    study_group = relevel(
+      factor(study_group),
+      ref = "HEU"
+    )
+  )
+
+# ---------------------------------------------------------
+# Fit multinomial logistic regression
+# ---------------------------------------------------------
+
+logi_study_grp_S1 <- multinom(
+  Mclust_cluster ~ study_group + host_age + host_sex,
+  data = meta_sub_refS1_refHEU,
+  trace = FALSE
+)
+
+# ---------------------------------------------------------
+# Extract coefficients, SEs, and p-values
+# ---------------------------------------------------------
+
+s <- summary(logi_study_grp_S1)
+
+coef <- as.matrix(s$coefficients)
+se   <- as.matrix(s$standard.errors)
+
+z <- coef / se
+p <- 2 * pnorm(abs(z), lower.tail = FALSE)
+
+OR      <- exp(coef)
+CI_low  <- exp(coef - 1.96 * se)
+CI_high <- exp(coef + 1.96 * se)
+
+# ---------------------------------------------------------
+# Create results table
+# ---------------------------------------------------------
+
+results_S1 <- data.frame(
+  Comparison = rep(rownames(coef), each = ncol(coef)),
+  Predictor  = rep(colnames(coef), times = nrow(coef)),
+  Estimate   = as.vector(t(coef)),
+  SE         = as.vector(t(se)),
+  Z          = as.vector(t(z)),
+  P          = as.vector(t(p)),
+  OR         = as.vector(t(OR)),
+  CI_low     = as.vector(t(CI_low)),
+  CI_high    = as.vector(t(CI_high))
+)
+
+# ---------------------------------------------------------
+# BH correction across all coefficients in this model
+# ---------------------------------------------------------
+
+results_S1$P_BH <- p.adjust(
+  results_S1$P,
+  method = "BH"
+)
+
+# ---------------------------------------------------------
+# Keep PS3 vs PS1 comparison
+# ---------------------------------------------------------
+
+results_PS3_vs_PS1 <- results_S1 %>%
+  filter(Comparison == "3") %>%
+  mutate(
+    Comparison = "PS3 vs PS1",
+    Predictor = recode(
+      Predictor,
+      "study_groupHI" = "HI vs HEU",
+      "study_groupHUU" = "HUU vs HEU",
+      "host_age" = "Age",
+      "host_sexM" = "Male vs Female"
+    ),
+    `95% CI` = sprintf(
+      "%.3f-%.3f",
+      CI_low,
+      CI_high
+    )
+  ) %>%
+  dplyr::select(
+    Comparison,
+    Predictor,
+    OR,
+    `95% CI`,
+    P,
+    P_BH
+  )
+
+results_PS3_vs_PS1
+```
+
+# Table 4b PS1 vs PS2 and PS3 vs PS2 (HUU as ref)
+```{r}
+# ---------------------------------------------------------
+# Set PS2 and HUU as reference levels
+# ---------------------------------------------------------
+
+meta_sub_refS2_refHUU <- meta_sub %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "2"
+    ),
+    study_group = relevel(
+      factor(study_group),
+      ref = "HUU"
+    )
+  )
+
+# ---------------------------------------------------------
+# Fit multinomial logistic regression
+# ---------------------------------------------------------
+
+logi_study_grp_S2_HUU <- multinom(
+  Mclust_cluster ~ study_group + host_age + host_sex,
+  data = meta_sub_refS2_refHUU,
+  trace = FALSE
+)
+
+# ---------------------------------------------------------
+# Extract coefficients and standard errors
+# ---------------------------------------------------------
+
+s <- summary(logi_study_grp_S2_HUU)
+
+coef <- as.matrix(s$coefficients)
+se   <- as.matrix(s$standard.errors)
+
+# ---------------------------------------------------------
+# Calculate Z statistics and p-values
+# ---------------------------------------------------------
+
+z <- coef / se
+p <- 2 * pnorm(abs(z), lower.tail = FALSE)
+
+# ---------------------------------------------------------
+# Odds ratios and 95% confidence intervals
+# ---------------------------------------------------------
+
+OR      <- exp(coef)
+CI_low  <- exp(coef - 1.96 * se)
+CI_high <- exp(coef + 1.96 * se)
+
+# ---------------------------------------------------------
+# Assemble results table
+# ---------------------------------------------------------
+
+results_S2_HUU <- data.frame(
+  Comparison = rep(rownames(coef), each = ncol(coef)),
+  Predictor  = rep(colnames(coef), times = nrow(coef)),
+  Estimate   = as.vector(t(coef)),
+  SE         = as.vector(t(se)),
+  Z          = as.vector(t(z)),
+  P          = as.vector(t(p)),
+  OR         = as.vector(t(OR)),
+  CI_low     = as.vector(t(CI_low)),
+  CI_high    = as.vector(t(CI_high))
+)
+
+# ---------------------------------------------------------
+# BH correction across all coefficients in this model
+# ---------------------------------------------------------
+
+results_S2_HUU$P_BH <- p.adjust(
+  results_S2_HUU$P,
+  method = "BH"
+)
+
+# ---------------------------------------------------------
+# Format results
+# ---------------------------------------------------------
+
+results_table_S2_HUU <- results_S2_HUU %>%
+  mutate(
+    Comparison = case_when(
+      Comparison == "1" ~ "PS1 vs PS2",
+      Comparison == "3" ~ "PS3 vs PS2",
+      TRUE ~ Comparison
+    ),
+    Predictor = recode(
+      Predictor,
+      "study_groupHI" = "HI vs HUU",
+      "study_groupHEU" = "HEU vs HUU",
+      "host_age" = "Age",
+      "host_sexM" = "Male vs Female"
+    ),
+    `95% CI` = sprintf(
+      "%.3f-%.3f",
+      CI_low,
+      CI_high
+    )
+  ) %>%
+  dplyr::select(
+    Comparison,
+    Predictor,
+    OR,
+    `95% CI`,
+    P,
+    P_BH
+  )
+
+results_table_S2_HUU
+
+```
+
+# Table 4b. PS3 vs PS1 (HUU as ref)
+ 
+```{r}
+
+# ---------------------------------------------------------
+# Set PS1 and HUU as reference levels
+# ---------------------------------------------------------
+
+meta_sub_refS1_refHUU <- meta_sub %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    ),
+    study_group = relevel(
+      factor(study_group),
+      ref = "HUU"
+    )
+  )
+
+# ---------------------------------------------------------
+# Fit multinomial logistic regression
+# ---------------------------------------------------------
+
+logi_study_grp_S1_HUU <- multinom(
+  Mclust_cluster ~ study_group + host_age + host_sex,
+  data = meta_sub_refS1_refHUU,
+  trace = FALSE
+)
+
+# ---------------------------------------------------------
+# Extract coefficients and standard errors
+# ---------------------------------------------------------
+
+s <- summary(logi_study_grp_S1_HUU)
+
+coef <- as.matrix(s$coefficients)
+se   <- as.matrix(s$standard.errors)
+
+# ---------------------------------------------------------
+# Calculate Z statistics and p-values
+# ---------------------------------------------------------
+
+z <- coef / se
+p <- 2 * pnorm(abs(z), lower.tail = FALSE)
+
+# ---------------------------------------------------------
+# Odds ratios and 95% confidence intervals
+# ---------------------------------------------------------
+
+OR      <- exp(coef)
+CI_low  <- exp(coef - 1.96 * se)
+CI_high <- exp(coef + 1.96 * se)
+
+# ---------------------------------------------------------
+# Assemble results table
+# ---------------------------------------------------------
+
+results_S1_HUU <- data.frame(
+  Comparison = rep(rownames(coef), each = ncol(coef)),
+  Predictor  = rep(colnames(coef), times = nrow(coef)),
+  Estimate   = as.vector(t(coef)),
+  SE         = as.vector(t(se)),
+  Z          = as.vector(t(z)),
+  P          = as.vector(t(p)),
+  OR         = as.vector(t(OR)),
+  CI_low     = as.vector(t(CI_low)),
+  CI_high    = as.vector(t(CI_high))
+)
+
+# ---------------------------------------------------------
+# BH correction across all coefficients in this model
+# ---------------------------------------------------------
+
+results_S1_HUU$P_BH <- p.adjust(
+  results_S1_HUU$P,
+  method = "BH"
+)
+
+# ---------------------------------------------------------
+# Extract PS3 vs PS1 results
+# ---------------------------------------------------------
+
+results_PS3_vs_PS1_HUU <- results_S1_HUU %>%
+  filter(Comparison == "3") %>%
+  mutate(
+    Comparison = "PS3 vs PS1",
+    Predictor = recode(
+      Predictor,
+      "study_groupHI" = "HI vs HUU",
+      "study_groupHEU" = "HEU vs HUU",
+      "host_age" = "Age",
+      "host_sexM" = "Male vs Female"
+    ),
+    `95% CI` = sprintf(
+      "%.3f-%.3f",
+      CI_low,
+      CI_high
+    )
+  ) %>%
+  dplyr::select(
+    Comparison,
+    Predictor,
+    OR,
+    `95% CI`,
+    P,
+    P_BH
+  )
+
+results_PS3_vs_PS1_HUU
+
+```
+
+
+
+
+
+
+# Table 6
+
+# HUU  specific caries saliva
+```{r}
+library(dplyr)
+library(broom)
+ 
+# ---------------------------------------------------------
+# HUU
+# ---------------------------------------------------------
+
+meta_HUU <- meta_sub %>%
+  filter(study_group == "HUU")
+
+table(meta_HUU$Mclust_cluster)
+
+# =========================================================
+# Reference = 2
+# Gives comparisons: 1 vs 2 and 3 vs 2
+# =========================================================
+
+meta_HUU_ref2 <- meta_HUU %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    )
+  )
+
+fit_ref2 <- glm(
+  caries_IL ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HUU_ref2
+)
+
+summary(fit_ref2 )
+
+
+res_ref2 <- broom::tidy(
+  fit_ref2,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Reference = 1
+# Gives comparison: 3 vs 1
+# =========================================================
+
+meta_HUU_ref1 <- meta_HUU %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "2"
+    )
+  )
+
+fit_ref1 <- glm(
+  caries_IL ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HUU_ref1
+)
+
+res_ref1 <- broom::tidy(
+  fit_ref1,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Extract the 3 unique comparisons
+# =========================================================
+
+results_3 <- bind_rows(
+
+  # 1 vs 2
+  res_ref2 %>%
+    filter(term == "Mclust_cluster1") %>%
+    transmute(
+      comparison = "1 vs 2",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 2
+  res_ref2 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 2",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 1
+  res_ref1 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 1",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    )
+) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+results_3
+
+
+
+
+####
+
+library(dplyr)
+library(broom)
+
+# ---------------------------------------------------------
+# HUU
+# ---------------------------------------------------------
+
+meta_HUU <- meta_sub%>%
+  filter(study_group == "HUU") %>%
+  mutate(
+    Mclust_cluster = factor(Mclust_cluster)
+  )
+
+table(meta_HUU$Mclust_cluster)
+
+
+# =========================================================
+# Reference = 2
+# Gives:
+#   1 vs 2
+#   3 vs 2
+# =========================================================
+
+fit_ref2 <- glm(
+  caries_IL ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HUU %>%
+    mutate(Mclust_cluster = relevel(Mclust_cluster, ref = "2"))
+)
+
+res_ref2 <- broom::tidy(
+  fit_ref2,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Reference = 1
+# Gives:
+#   2 vs 1
+#   3 vs 1
+# We only need 3 vs 1
+# =========================================================
+
+fit_ref1 <- glm(
+  caries_IL ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HUU %>%
+    mutate(Mclust_cluster = relevel(Mclust_cluster, ref = "1"))
+)
+
+res_ref1 <- broom::tidy(
+  fit_ref1,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Extract the 3 unique comparisons
+# =========================================================
+
+results_3 <- bind_rows(
+
+  # 1 vs 2
+  res_ref2 %>%
+    filter(term == "Mclust_cluster1") %>%
+    transmute(
+      comparison = "1 vs 2",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 2
+  res_ref2 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 2",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 1
+  res_ref1 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 1",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    )
+) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+results_3
+
+
+```
+
+# HUU caries plasma
+```{r}
+# =========================================================
+# HUU: Caries outcome — plasma phenotypes
+# Reference = PP1
+# Comparison = PP2 vs PP1
+# Adjusted for age and sex
+# =========================================================
+
+meta_HUU <- meta_sub %>%
+  filter(study_group == "HUU")
+
+table(meta_HUU$Mclust_cluster)
+
+
+# =========================================================
+# Reference = PP1
+# =========================================================
+
+meta_HUU_ref1 <- meta_HUU %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    )
+  )
+
+fit_caries_HUU_plasma <- glm(
+  caries_IL ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HUU_ref1
+)
+
+summary(fit_caries_HUU_plasma)
+
+
+# =========================================================
+# Extract PP2 vs PP1
+# =========================================================
+
+results_caries_HUU_plasma <- broom::tidy(
+  fit_caries_HUU_plasma,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(term == "Mclust_cluster2") %>%
+  transmute(
+    comparison = "PP2 vs PP1",
+    OR = estimate,
+    CI_low = conf.low,
+    CI_high = conf.high,
+    p = p.value
+  ) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+print(results_caries_HUU_plasma)
+```
+
+
+
+
+#HUU CD4 saliva refit
+```{r}
+# =========================================================
+# HUU: CD4 outcome
+# Three pairwise comparisons
+# Outcome: log-transformed CD4
+# Adjusted for age and sex
+# =========================================================
+
+library(dplyr)
+library(broom)
+
+# ---------------------------------------------------------
+# HUU data
+# ---------------------------------------------------------
+
+meta_HUU <- meta_sub %>%
+  filter(study_group == "HUU")
+
+table(meta_HUU$Mclust_cluster)
+
+
+# =========================================================
+# Reference = 2
+# Gives comparisons: 1 vs 2 and 3 vs 2
+# =========================================================
+
+meta_HUU_ref2 <- meta_HUU %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "2"
+    )
+  )
+
+fit_CD4_ref2 <- lm(
+  logCD4 ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  data = meta_HUU_ref2
+)
+
+res_CD4_ref2 <- broom::tidy(
+  fit_CD4_ref2,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Reference = 1
+# Gives comparison: 3 vs 1
+# =========================================================
+
+meta_HUU_ref1 <- meta_HUU %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    )
+  )
+
+fit_CD4_ref1 <- lm(
+  logCD4 ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  data = meta_HUU_ref1
+)
+
+res_CD4_ref1 <- broom::tidy(
+  fit_CD4_ref1,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Extract the 3 unique pairwise comparisons
+# =========================================================
+
+results_CD4_HUU <- bind_rows(
+
+  # 1 vs 2
+  res_CD4_ref2 %>%
+    filter(term == "Mclust_cluster1") %>%
+    transmute(
+      comparison = "1 vs 2",
+      beta = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 2
+  res_CD4_ref2 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 2",
+      beta = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 1
+  res_CD4_ref1 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 1",
+      beta = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    )
+) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+print(results_CD4_HUU)
+
+```
+
+
+
+
+#HUU CD4 plasma 
+
+```{r}
+# =========================================================
+# HUU: CD4 outcome — plasma phenotypes
+# Reference = PP1
+# Comparison = PP2 vs PP1
+# Adjusted for age and sex
+# =========================================================
+
+meta_HUU <- meta_sub %>%
+  filter(study_group == "HUU")
+
+table(meta_HUU$Mclust_cluster)
+
+
+# =========================================================
+# Reference = PP1
+# =========================================================
+
+meta_HUU_ref1 <- meta_HUU %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    )
+  )
+
+fit_CD4_HUU_plasma <- lm(
+  logCD4 ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  data = meta_HUU_ref1
+)
+
+summary(fit_CD4_HUU_plasma)
+
+
+# =========================================================
+# Extract PP2 vs PP1
+# =========================================================
+
+results_CD4_HUU_plasma <- broom::tidy(
+  fit_CD4_HUU_plasma,
+  conf.int = TRUE
+) %>%
+  filter(term == "Mclust_cluster2") %>%
+  transmute(
+    comparison = "PP2 vs PP1",
+    beta = estimate,
+    CI_low = conf.low,
+    CI_high = conf.high,
+    p = p.value
+  ) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+print(results_CD4_HUU_plasma)
+
+```
+
+
+
+
+# HEU caries specific pooled saliva
+
+```{r}
+library(dplyr)
+library(broom)
+
+# ---------------------------------------------------------
+# HEU
+# ---------------------------------------------------------
+
+meta_HEU <- meta_sub %>%
+  filter(study_group == "HEU")
+
+
+# =========================================================
+# Reference = 2
+# Gives comparisons: 1 vs 2 and 3 vs 2
+# =========================================================
+
+meta_HEU_ref2 <- meta_HEU %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "2"
+    )
+  )
+
+fit_ref2 <- glm(
+  caries_IL ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HEU_ref2
+)
+
+res_ref2 <- broom::tidy(
+  fit_ref2,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Reference = 1
+# Gives comparison: 3 vs 1
+# =========================================================
+
+meta_HEU_ref1 <- meta_HEU %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    )
+  )
+
+fit_ref1 <- glm(
+  caries_IL ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HEU_ref1
+)
+
+res_ref1 <- broom::tidy(
+  fit_ref1,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Extract the 3 unique comparisons
+# =========================================================
+
+results_3_HEU <- bind_rows(
+
+  # 1 vs 2
+  res_ref2 %>%
+    filter(term == "Mclust_cluster1") %>%
+    transmute(
+      comparison = "1 vs 2",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 2
+  res_ref2 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 2",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 1
+  res_ref1 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 1",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    )
+) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+results_3_HEU
+```
+
+
+# HEU caries PLASMA
+
+```{r}
+# =========================================================
+# HEU: Caries outcome — plasma phenotypes
+# Reference = PP1
+# Comparison = PP2 vs PP1
+# Adjusted for age and sex
+# =========================================================
+
+meta_HEU <- meta_sub %>%
+  filter(study_group == "HEU")
+
+table(meta_HEU$Mclust_cluster)
+
+
+# =========================================================
+# Reference = PP1
+# =========================================================
+
+meta_HEU_ref1 <- meta_HEU %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    )
+  )
+
+fit_caries_HEU_plasma <- glm(
+  caries_IL ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HEU_ref1
+)
+
+summary(fit_caries_HEU_plasma)
+
+
+# =========================================================
+# Extract PP2 vs PP1
+# =========================================================
+
+results_caries_HEU_plasma <- broom::tidy(
+  fit_caries_HEU_plasma,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(term == "Mclust_cluster2") %>%
+  transmute(
+    comparison = "PP2 vs PP1",
+    OR = estimate,
+    CI_low = conf.low,
+    CI_high = conf.high,
+    p = p.value
+  ) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+print(results_caries_HEU_plasma)
+```
+
+
+
+# HEU CD4 saliva
+```{r}
+
+# =========================================================
+# HEU: CD4 outcome
+# Three pairwise comparisons
+# Outcome: log-transformed CD4
+# Adjusted for age and sex
+# =========================================================
+
+meta_HEU <- meta_sub %>%
+  filter(study_group == "HEU")
+
+table(meta_HEU$Mclust_cluster)
+
+
+# =========================================================
+# Reference = 2
+# Gives comparisons: 1 vs 2 and 3 vs 2
+# =========================================================
+
+meta_HEU_ref2 <- meta_HEU %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "2"
+    )
+  )
+
+fit_CD4_HEU_ref2 <- lm(
+  logCD4 ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  data = meta_HEU_ref2
+)
+
+res_CD4_HEU_ref2 <- broom::tidy(
+  fit_CD4_HEU_ref2,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Reference = 1
+# Gives comparison: 3 vs 1
+# =========================================================
+
+meta_HEU_ref1 <- meta_HEU %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    )
+  )
+
+fit_CD4_HEU_ref1 <- lm(
+  logCD4 ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  data = meta_HEU_ref1
+)
+
+res_CD4_HEU_ref1 <- broom::tidy(
+  fit_CD4_HEU_ref1,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Extract the 3 unique pairwise comparisons
+# =========================================================
+
+results_CD4_HEU <- bind_rows(
+
+  # 1 vs 2
+  res_CD4_HEU_ref2 %>%
+    filter(term == "Mclust_cluster1") %>%
+    transmute(
+      comparison = "1 vs 2",
+      beta = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 2
+  res_CD4_HEU_ref2 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 2",
+      beta = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 1
+  res_CD4_HEU_ref1 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 1",
+      beta = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    )
+) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+print(results_CD4_HEU)
+
+```
+
+
+# HEU CD4 PLASMA
+```{r}
+# =========================================================
+# HEU: CD4 outcome — plasma phenotypes
+# Reference = PP1
+# Comparison = PP2 vs PP1
+# Adjusted for age and sex
+# =========================================================
+
+meta_HEU <- meta_sub %>%
+  filter(study_group == "HEU")
+
+table(meta_HEU$Mclust_cluster)
+
+
+# =========================================================
+# Reference = PP1
+# =========================================================
+
+meta_HEU_ref1 <- meta_HEU %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    )
+  )
+
+fit_CD4_HEU_plasma <- lm(
+  logCD4 ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  data = meta_HEU_ref1
+)
+
+summary(fit_CD4_HEU_plasma)
+
+
+# =========================================================
+# Extract PP2 vs PP1
+# =========================================================
+
+results_CD4_HEU_plasma <- broom::tidy(
+  fit_CD4_HEU_plasma,
+  conf.int = TRUE
+) %>%
+  filter(term == "Mclust_cluster2") %>%
+  transmute(
+    comparison = "PP2 vs PP1",
+    beta = estimate,
+    CI_low = conf.low,
+    CI_high = conf.high,
+    p = p.value
+  ) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+print(results_CD4_HEU_plasma)
+
+```
+
+
+
+# HI specific analysis.
+#Association caries with pooled saliva immune phenotypes
+```{r}
+
+library(dplyr)
+library(broom)
+
+# ---------------------------------------------------------
+# HI
+# ---------------------------------------------------------
+
+meta_HI <- meta_sub %>%
+  filter(study_group == "HI")
+
+
+# =========================================================
+# Reference = 2
+# Gives comparisons: 1 vs 2 and 3 vs 2
+# =========================================================
+
+meta_HI_ref2 <- meta_HI %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "2"
+    )
+  )
+
+fit_ref2 <- glm(
+  caries_IL ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HI_ref2
+)
+
+res_ref2 <- broom::tidy(
+  fit_ref2,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Reference = 1
+# Gives comparison: 3 vs 1
+# =========================================================
+
+meta_HI_ref1 <- meta_HI %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    )
+  )
+
+fit_ref1 <- glm(
+  caries_IL ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HI_ref1
+)
+
+res_ref1 <- broom::tidy(
+  fit_ref1,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Extract the 3 unique comparisons
+# =========================================================
+
+results_3_HI <- bind_rows(
+
+  # 1 vs 2
+  res_ref2 %>%
+    filter(term == "Mclust_cluster1") %>%
+    transmute(
+      comparison = "1 vs 2",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 2
+  res_ref2 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 2",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 1
+  res_ref1 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 1",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    )
+) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+results_3_HI
+
+```
+
+
+# # HI specific analysis. Association of caries with pooled PLASMA immune phenotypes 
+```{r}
+# =========================================================
+# HI: Caries outcome — plasma phenotypes
+# Reference = PP1
+# Comparison = PP2 vs PP1
+# Adjusted for age and sex
+# =========================================================
+
+meta_HI <- meta_sub %>%
+  filter(study_group == "HI")
+
+table(meta_HI$Mclust_cluster)
+
+
+# =========================================================
+# Reference = PP1
+# =========================================================
+
+meta_HI_ref1 <- meta_HI %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    )
+  )
+
+fit_caries_HI_plasma <- glm(
+  caries_IL ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HI_ref1
+)
+
+summary(fit_caries_HI_plasma)
+
+
+# =========================================================
+# Extract PP2 vs PP1
+# =========================================================
+
+results_caries_HI_plasma <- broom::tidy(
+  fit_caries_HI_plasma,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(term == "Mclust_cluster2") %>%
+  transmute(
+    comparison = "PP2 vs PP1",
+    OR = estimate,
+    CI_low = conf.low,
+    CI_high = conf.high,
+    p = p.value
+  ) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+print(results_caries_HI_plasma)
+
+```
+
+
+# HI specific analysis. Association of viral load with pooled saliva immune phenotypes 
+```{r}
+library(dplyr)
+library(broom)
+
+meta_HI <- meta_sub %>%
+  filter(study_group == "HI")
+
+table(meta_HI$Mclust_cluster)
+
+# ============================================================
+# VIRAL LOAD
+# Outcome: viral_load_bin_update
+# Comparisons: 2 vs 1, 3 vs 1, 3 vs 2
+# ============================================================
+
+meta_HI$viral_load_bin_update <- factor(meta_HI$viral_load_bin_update)
+
+# ------------------------------------------------------------
+# Reference = 1
+# Gives:
+#   2 vs 1
+#   3 vs 1
+# ------------------------------------------------------------
+
+meta_HI_ref1 <- meta_HI %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    )
+  )
+
+fit_vl_ref1 <- glm(
+  viral_load_bin_update ~ Mclust_cluster + 
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HI_ref1
+)
+
+res_vl_ref1 <- broom::tidy(
+  fit_vl_ref1,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# ------------------------------------------------------------
+# Reference = 2
+# Gives:
+#   1 vs 2
+#   3 vs 2
+# We only need 3 vs 2
+# ------------------------------------------------------------
+
+meta_HI_ref2 <- meta_HI %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "2"
+    )
+  )
+
+fit_vl_ref2 <- glm(
+  viral_load_bin_update ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HI_ref2
+)
+
+res_vl_ref2 <- broom::tidy(
+  fit_vl_ref2,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# ============================================================
+# Extract the 3 comparisons
+# ============================================================
+
+results_vl_3 <- bind_rows(
+
+  # 2 vs 1
+  res_vl_ref1 %>%
+    filter(term == "Mclust_cluster2") %>%
+    transmute(
+      comparison = "2 vs 1",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 1
+  res_vl_ref1 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 1",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 2
+  res_vl_ref2 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 2",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    )
+) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+results_vl_3
+
+
+```
+
+
+
+# HI specific analysis. Association of ART regimen with pooled saliva immune phenotypes 
+```{r}
+# =========================================================
+# HI: Therapy outcome
+# Three pairwise comparisons
+# Outcome: therapy_binary
+# Adjusted for age and sex
+# =========================================================
+
+meta_HI <- meta_sub %>%
+  filter(study_group == "HI")
+
+table(meta_HI$Mclust_cluster)
+
+
+# =========================================================
+# Reference = 2
+# Gives comparisons: 1 vs 2 and 3 vs 2
+# =========================================================
+
+meta_HI_ref2 <- meta_HI %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "2"
+    )
+  )
+
+fit_therapy_HI_ref2 <- glm(
+  therapy_binary ~ Mclust_cluster + 
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HI_ref2
+)
+
+res_therapy_HI_ref2 <- broom::tidy(
+  fit_therapy_HI_ref2,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Reference = 1
+# Gives comparison: 3 vs 1
+# =========================================================
+
+meta_HI_ref1 <- meta_HI %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    )
+  )
+
+fit_therapy_HI_ref1 <- glm(
+  therapy_binary ~ Mclust_cluster + 
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HI_ref1
+)
+
+res_therapy_HI_ref1 <- broom::tidy(
+  fit_therapy_HI_ref1,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^Mclust_cluster", term))
+
+
+# =========================================================
+# Extract the 3 unique pairwise comparisons
+# =========================================================
+
+results_therapy_HI <- bind_rows(
+
+  # 1 vs 2
+  res_therapy_HI_ref2 %>%
+    filter(term == "Mclust_cluster1") %>%
+    transmute(
+      comparison = "1 vs 2",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 2
+  res_therapy_HI_ref2 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 2",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # 3 vs 1
+  res_therapy_HI_ref1 %>%
+    filter(term == "Mclust_cluster3") %>%
+    transmute(
+      comparison = "3 vs 1",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    )
+) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+print(results_therapy_HI)
+```
+
+
+# HI specific analysis. Association of ART regimen with pooled plasma immune phenotypes 
+
+```{r}
+# =========================================================
+# HI: Therapy outcome — plasma phenotypes
+# Reference = PP1
+# Comparison = PP2 vs PP1
+# Adjusted for age and sex
+# =========================================================
+
+meta_HI <- meta_sub %>%
+  filter(study_group == "HI")
+
+table(meta_HI$Mclust_cluster)
+
+
+# =========================================================
+# Reference = PP1
+# =========================================================
+
+meta_HI_ref1 <- meta_HI %>%
+  mutate(
+    Mclust_cluster = relevel(
+      factor(Mclust_cluster),
+      ref = "1"
+    )
+  )
+
+fit_therapy_HI_plasma <- glm(
+  therapy_binary ~ Mclust_cluster +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_HI_ref1
+)
+
+summary(fit_therapy_HI_plasma)
+
+
+# =========================================================
+# Extract PP2 vs PP1
+# =========================================================
+
+results_therapy_HI_plasma <- broom::tidy(
+  fit_therapy_HI_plasma,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(term == "Mclust_cluster2") %>%
+  transmute(
+    comparison = "PP2 vs PP1",
+    OR = estimate,
+    CI_low = conf.low,
+    CI_high = conf.high,
+    p = p.value
+  ) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+print(results_therapy_HI_plasma)
+
+```
+
+
+
+# PERMANOVA of Bray-Curtis community composition in pooled saliva phenotypes
+
+```{r}
+
+### Make  physeq_pooled_clust from physeq_HI and meta_sub
+physeq_pooled <- physeq_all_389
+if (!taxa_are_rows(physeq_pooled)) {
+  physeq_pooled <- t(physeq_pooled)
+}
+physeq_pooled
+
+head(data.frame(otu_table(physeq_pooled)))
+
+# ---------------------------------------------------------
+# metadata formatting
+# ---------------------------------------------------------
+meta_sub$Mclust_cluster <- factor(meta_sub$Mclust_cluster)
+meta_sub$caries_IL <- factor(meta_sub$caries_IL)
+meta_sub$host_sex <- factor(meta_sub$host_sex)
+rownames(meta_sub) <- meta_sub$host_subject_id
+
+
+# ---------------------------------------------------------
+# ensure sample order matches
+# ---------------------------------------------------------
+# Check whether sample IDs are in exactly the same order
+identical(
+  rownames(sample_data(physeq_pooled)),
+  rownames(meta_sub)
+)
+sample_data(physeq_pooled) <- sample_data(meta_sub) 
+
+physeq_pooled
+
+
+# =========================================================
+# PCoA: Salivary immune phenotypes
+# Bray-Curtis + centroids + spider lines + 95% ellipses
+# + adjusted PERMANOVA R2 and p-value
+# =========================================================
+
+library(phyloseq)
+library(vegan)
+library(ggplot2)
+library(dplyr)
+
+# ---------------------------------------------------------
+# 1. Relative abundance
+# ---------------------------------------------------------
+
+physeq_rel <- transform_sample_counts(
+  physeq_pooled,
+  function(x) x / sum(x)
+)
+
+physeq_rel <- prune_taxa(
+  taxa_sums(physeq_rel) > 0,
+  physeq_rel
+)
+
+# ---------------------------------------------------------
+# 2. Bray-Curtis distance
+# ---------------------------------------------------------
+
+bray_pooled <- phyloseq::distance(
+  physeq_rel,
+  method = "bray"
+)
+
+# ---------------------------------------------------------
+# 3. Metadata
+# ---------------------------------------------------------
+
+meta_pooled <- data.frame(
+  sample_data(physeq_rel)
+)
+
+meta_pooled$Mclust_cluster <- factor(
+  meta_pooled$Mclust_cluster,
+  levels = c("1", "2", "3")
+)
+
+meta_pooled$study_group <- factor(
+  meta_pooled$study_group,
+  levels = c("HEU", "HUU", "HI")
+)
+
+meta_pooled$caries_IL <- factor(
+  meta_pooled$caries_IL,
+  levels = c(0, 1)
+)
+
+meta_pooled$host_sex <- factor(
+  meta_pooled$host_sex
+)
+
+# ---------------------------------------------------------
+# 4. PCoA
+# ---------------------------------------------------------
+
+pcoa_res <- ordinate(
+  physeq_rel,
+  method = "PCoA",
+  distance = bray_pooled
+)
+
+# ---------------------------------------------------------
+# 5. Extract PCoA coordinates
+# ---------------------------------------------------------
+
+pcoa_coords <- as.data.frame(
+  pcoa_res$vectors[, 1:2]
+)
+
+pcoa_coords$Sample <- rownames(pcoa_coords)
+
+colnames(pcoa_coords)[1:2] <- c(
+  "PCoA1",
+  "PCoA2"
+)
+
+# ---------------------------------------------------------
+# 6. Add metadata
+# ---------------------------------------------------------
+
+meta_pooled$Sample <- rownames(meta_pooled)
+
+pcoa_df <- left_join(
+  pcoa_coords,
+  meta_pooled,
+  by = "Sample"
+)
+
+# ---------------------------------------------------------
+# 7. Salivary phenotype labels
+# ---------------------------------------------------------
+
+pcoa_df$Mclust_cluster <- factor(
+  pcoa_df$Mclust_cluster,
+  levels = c("1", "2", "3"),
+  labels = c("PS1", "PS2", "PS3")
+)
+
+# ---------------------------------------------------------
+# 8. Variance explained
+# ---------------------------------------------------------
+
+eig <- pcoa_res$values$Eigenvalues
+
+pc1_var <- round(
+  100 * eig[1] / sum(eig[eig > 0]),
+  1
+)
+
+pc2_var <- round(
+  100 * eig[2] / sum(eig[eig > 0]),
+  1
+)
+
+# ---------------------------------------------------------
+# 9. PERMANOVA
+# ---------------------------------------------------------
+
+set.seed(123)
+
+permanova <- adonis2(
+  bray_pooled ~
+    Mclust_cluster +
+    study_group +
+    caries_IL +
+    host_age +
+    host_sex,
+  data = meta_pooled,
+  permutations = 999,
+  by = "margin"
+)
+
+print(permanova)
+
+# ---------------------------------------------------------
+# 10. Extract phenotype R2 and p-value
+# ---------------------------------------------------------
+
+r2_phenotype <- permanova[
+  "Mclust_cluster",
+  "R2"
+]
+
+p_phenotype <- permanova[
+  "Mclust_cluster",
+  "Pr(>F)"
+]
+
+p_label <- ifelse(
+  p_phenotype < 0.001,
+  "PERMANOVA: R² = 0.XXX, p < 0.001",
+  paste0(
+    "PERMANOVA: R² = ",
+    round(r2_phenotype, 3),
+    ", p = ",
+    format.pval(
+      p_phenotype,
+      digits = 3,
+      eps = 0.001
+    )
+  )
+)
+
+# Replace the placeholder R2 if p < 0.001
+p_label <- paste0(
+  "PERMANOVA: R² = ",
+  round(r2_phenotype, 3),
+  ", p ",
+  ifelse(
+    p_phenotype < 0.001,
+    "< 0.001",
+    paste0(
+      "= ",
+      format.pval(
+        p_phenotype,
+        digits = 3,
+        eps = 0.001
+      )
+    )
+  )
+)
+
+# ---------------------------------------------------------
+# 11. Calculate cluster centroids
+# ---------------------------------------------------------
+
+centroids <- pcoa_df %>%
+  group_by(Mclust_cluster) %>%
+  summarise(
+    PCoA1 = mean(PCoA1, na.rm = TRUE),
+    PCoA2 = mean(PCoA2, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ---------------------------------------------------------
+# 12. Colors
+# ---------------------------------------------------------
+
+cluster_colors <- c(
+  "PS1" = "#D73027",
+  "PS2" = "#2C7BB6",
+  "PS3" = "#1B9E77"
+)
+
+# ---------------------------------------------------------
+# 13. PCoA plot
+# ---------------------------------------------------------
+
+p_pcoa <- ggplot(
+  pcoa_df,
+  aes(
+    x = PCoA1,
+    y = PCoA2,
+    color = Mclust_cluster
+  )
+) +
+
+  # -------------------------------------------------------
+  # Spider lines: samples → cluster centroid
+  # -------------------------------------------------------
+  geom_segment(
+    data = pcoa_df %>%
+      left_join(
+        centroids,
+        by = "Mclust_cluster",
+        suffix = c("", "_centroid")
+      ),
+    aes(
+      xend = PCoA1_centroid,
+      yend = PCoA2_centroid,
+      color = Mclust_cluster
+    ),
+    linewidth = 0.35,
+    alpha = 0.25
+  ) +
+
+  # -------------------------------------------------------
+  # 95% confidence ellipses
+  # -------------------------------------------------------
+  stat_ellipse(
+    aes(
+      group = Mclust_cluster
+    ),
+    type = "norm",
+    level = 0.95,
+    linewidth = 0.9,
+    alpha = 0.8
+  ) +
+
+  # -------------------------------------------------------
+  # Sample points
+  # -------------------------------------------------------
+  geom_point(
+    size = 3,
+    alpha = 0.75
+  ) +
+
+  # -------------------------------------------------------
+  # Cluster centroids
+  # -------------------------------------------------------
+  geom_point(
+    data = centroids,
+    aes(
+      x = PCoA1,
+      y = PCoA2,
+      fill = Mclust_cluster
+    ),
+    shape = 23,
+    size = 5,
+    color = "black",
+    stroke = 0.8
+  ) +
+
+  # -------------------------------------------------------
+  # Centroid labels
+  # -------------------------------------------------------
+  geom_text(
+    data = centroids,
+    aes(
+      x = PCoA1,
+      y = PCoA2,
+      label = Mclust_cluster
+    ),
+    color = "black",
+    fontface = "bold",
+    size = 4,
+    vjust = -1.2
+  ) +
+
+  # -------------------------------------------------------
+  # Colors
+  # -------------------------------------------------------
+  scale_color_manual(
+    values = cluster_colors,
+    name = "Salivary Phenotype"
+  ) +
+
+  scale_fill_manual(
+    values = cluster_colors,
+    guide = "none"
+  ) +
+
+  # -------------------------------------------------------
+  # Labels
+  # -------------------------------------------------------
+  labs(
+    x = paste0(
+      "PCoA1 (",
+      pc1_var,
+      "%)"
+    ),
+    y = paste0(
+      "PCoA2 (",
+      pc2_var,
+      "%)"
+    )
+  ) +
+
+  # -------------------------------------------------------
+  # PERMANOVA annotation
+  # -------------------------------------------------------
+  annotate(
+    "text",
+    x = Inf,
+    y = Inf,
+    label = p_label,
+    hjust = 1.05,
+    vjust = 1.5,
+    size = 4.2,
+    fontface = "bold"
+  ) +
+
+  # -------------------------------------------------------
+  # Theme
+  # -------------------------------------------------------
+  theme_classic(
+    base_size = 14
+  ) +
+
+  theme(
+    axis.title.x = element_text(
+      size = 15,
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      size = 15,
+      face = "bold"
+    ),
+    axis.text = element_text(
+      size = 12
+    ),
+    legend.title = element_text(
+      size = 13,
+      face = "bold"
+    ),
+    legend.text = element_text(
+      size = 12
+    ),
+    legend.position = "right"
+  )
+
+# ---------------------------------------------------------
+# 14. Print plot
+# ---------------------------------------------------------
+
+p_pcoa
+
+```
+
+
+## PERMANOVA of Bray-Curtis community composition in pooled plasma phenotypes
+
+```{r}
+
+### Make  physeq_pooled_clust from physeq_HI and meta_sub
+physeq_pooled <- physeq_all_389
+if (!taxa_are_rows(physeq_pooled)) {
+  physeq_pooled <- t(physeq_pooled)
+}
+physeq_pooled
+
+head(data.frame(otu_table(physeq_pooled)))
+
+# ---------------------------------------------------------
+# metadata formatting
+# ---------------------------------------------------------
+meta_sub$Mclust_cluster <- factor(meta_sub$Mclust_cluster)
+meta_sub$caries_IL <- factor(meta_sub$caries_IL)
+meta_sub$host_sex <- factor(meta_sub$host_sex)
+rownames(meta_sub) <- meta_sub$host_subject_id
+
+table(meta_sub$Mclust_cluster)
+# ---------------------------------------------------------
+# ensure sample order matches
+# ---------------------------------------------------------
+# Check whether sample IDs are in exactly the same order
+identical(
+  rownames(sample_data(physeq_pooled)),
+  rownames(meta_sub)
+)
+sample_data(physeq_pooled) <- sample_data(meta_sub) 
+
+physeq_pooled
+
+
+# =========================================================
+# PCoA: Plasma immune phenotypes — 2 clusters
+# Bray-Curtis + centroids + spider lines + 95% ellipses
+# + adjusted PERMANOVA R2 and p-value
+# =========================================================
+
+library(phyloseq)
+library(vegan)
+library(ggplot2)
+library(dplyr)
+
+# ---------------------------------------------------------
+# 1. Relative abundance
+# ---------------------------------------------------------
+
+physeq_rel <- transform_sample_counts(
+  physeq_pooled,
+  function(x) x / sum(x)
+)
+
+physeq_rel <- prune_taxa(
+  taxa_sums(physeq_rel) > 0,
+  physeq_rel
+)
+
+# ---------------------------------------------------------
+# 2. Bray-Curtis distance
+# ---------------------------------------------------------
+
+bray_pooled <- phyloseq::distance(
+  physeq_rel,
+  method = "bray"
+)
+
+# ---------------------------------------------------------
+# 3. Metadata
+# ---------------------------------------------------------
+
+meta_pooled <- data.frame(
+  sample_data(physeq_rel)
+)
+
+meta_pooled$Mclust_cluster <- factor(
+  meta_pooled$Mclust_cluster,
+  levels = c("1", "2")
+)
+
+meta_pooled$study_group <- factor(
+  meta_pooled$study_group,
+  levels = c("HEU", "HUU", "HI")
+)
+
+meta_pooled$caries_IL <- factor(
+  meta_pooled$caries_IL,
+  levels = c(0, 1)
+)
+
+meta_pooled$host_sex <- factor(
+  meta_pooled$host_sex
+)
+
+# ---------------------------------------------------------
+# 4. PCoA
+# ---------------------------------------------------------
+
+pcoa_res <- ordinate(
+  physeq_rel,
+  method = "PCoA",
+  distance = bray_pooled
+)
+
+# ---------------------------------------------------------
+# 5. Extract PCoA coordinates
+# ---------------------------------------------------------
+
+pcoa_coords <- as.data.frame(
+  pcoa_res$vectors[, 1:2]
+)
+
+pcoa_coords$Sample <- rownames(pcoa_coords)
+
+colnames(pcoa_coords)[1:2] <- c(
+  "PCoA1",
+  "PCoA2"
+)
+
+# ---------------------------------------------------------
+# 6. Add metadata
+# ---------------------------------------------------------
+
+meta_pooled$Sample <- rownames(meta_pooled)
+
+pcoa_df <- left_join(
+  pcoa_coords,
+  meta_pooled,
+  by = "Sample"
+)
+
+# ---------------------------------------------------------
+# 7. Plasma phenotype labels
+# ---------------------------------------------------------
+
+pcoa_df$Mclust_cluster <- factor(
+  pcoa_df$Mclust_cluster,
+  levels = c("1", "2"),
+  labels = c("PP1", "PP2")
+)
+
+# ---------------------------------------------------------
+# 8. Variance explained
+# ---------------------------------------------------------
+
+eig <- pcoa_res$values$Eigenvalues
+
+pc1_var <- round(
+  100 * eig[1] / sum(eig[eig > 0]),
+  1
+)
+
+pc2_var <- round(
+  100 * eig[2] / sum(eig[eig > 0]),
+  1
+)
+
+# ---------------------------------------------------------
+# 9. PERMANOVA
+# ---------------------------------------------------------
+
+set.seed(123)
+
+permanova <- adonis2(
+  bray_pooled ~
+    Mclust_cluster +
+    study_group +
+    caries_IL +
+    host_age +
+    host_sex,
+  data = meta_pooled,
+  permutations = 999,
+  by = "margin"
+)
+
+print(permanova)
+
+# ---------------------------------------------------------
+# 10. Extract phenotype R2 and p-value
+# ---------------------------------------------------------
+
+r2_phenotype <- permanova[
+  "Mclust_cluster",
+  "R2"
+]
+
+p_phenotype <- permanova[
+  "Mclust_cluster",
+  "Pr(>F)"
+]
+
+p_label <- paste0(
+  "PERMANOVA: R² = ",
+  round(r2_phenotype, 3),
+  ", p ",
+  ifelse(
+    p_phenotype < 0.001,
+    "< 0.001",
+    paste0(
+      "= ",
+      format.pval(
+        p_phenotype,
+        digits = 3,
+        eps = 0.001
+      )
+    )
+  )
+)
+
+# ---------------------------------------------------------
+# 11. Calculate cluster centroids
+# ---------------------------------------------------------
+
+centroids <- pcoa_df %>%
+  group_by(Mclust_cluster) %>%
+  summarise(
+    PCoA1 = mean(PCoA1, na.rm = TRUE),
+    PCoA2 = mean(PCoA2, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ---------------------------------------------------------
+# 12. Colors
+# ---------------------------------------------------------
+
+cluster_colors <- c(
+  "PP1" = "#D73027",
+  "PP2" = "#2C7BB6"
+)
+
+# ---------------------------------------------------------
+# 13. PCoA plot
+# ---------------------------------------------------------
+
+p_pcoa_plasma <- ggplot(
+  pcoa_df,
+  aes(
+    x = PCoA1,
+    y = PCoA2,
+    color = Mclust_cluster
+  )
+) +
+
+  # -------------------------------------------------------
+  # Spider lines: samples → centroid
+  # -------------------------------------------------------
+  geom_segment(
+    data = pcoa_df %>%
+      left_join(
+        centroids,
+        by = "Mclust_cluster",
+        suffix = c("", "_centroid")
+      ),
+    aes(
+      xend = PCoA1_centroid,
+      yend = PCoA2_centroid,
+      color = Mclust_cluster
+    ),
+    linewidth = 0.35,
+    alpha = 0.25
+  ) +
+
+  # -------------------------------------------------------
+  # 95% confidence ellipses
+  # -------------------------------------------------------
+  stat_ellipse(
+    aes(
+      group = Mclust_cluster
+    ),
+    type = "norm",
+    level = 0.95,
+    linewidth = 0.9,
+    alpha = 0.8
+  ) +
+
+  # -------------------------------------------------------
+  # Sample points
+  # -------------------------------------------------------
+  geom_point(
+    size = 3,
+    alpha = 0.75
+  ) +
+
+  # -------------------------------------------------------
+  # Centroids
+  # -------------------------------------------------------
+  geom_point(
+    data = centroids,
+    aes(
+      x = PCoA1,
+      y = PCoA2,
+      fill = Mclust_cluster
+    ),
+    shape = 23,
+    size = 5,
+    color = "black",
+    stroke = 0.8
+  ) +
+
+  # -------------------------------------------------------
+  # Centroid labels
+  # -------------------------------------------------------
+  geom_text(
+    data = centroids,
+    aes(
+      x = PCoA1,
+      y = PCoA2,
+      label = Mclust_cluster
+    ),
+    color = "black",
+    fontface = "bold",
+    size = 4,
+    vjust = -1.2
+  ) +
+
+  # -------------------------------------------------------
+  # Colors
+  # -------------------------------------------------------
+  scale_color_manual(
+    values = cluster_colors,
+    name = "Plasma Phenotype"
+  ) +
+
+  scale_fill_manual(
+    values = cluster_colors,
+    guide = "none"
+  ) +
+
+  # -------------------------------------------------------
+  # Axis labels
+  # -------------------------------------------------------
+  labs(
+    x = paste0(
+      "PCoA1 (",
+      pc1_var,
+      "%)"
+    ),
+    y = paste0(
+      "PCoA2 (",
+      pc2_var,
+      "%)"
+    )
+  ) +
+
+  # -------------------------------------------------------
+  # PERMANOVA annotation
+  # -------------------------------------------------------
+  annotate(
+    "text",
+    x = Inf,
+    y = Inf,
+    label = p_label,
+    hjust = 1.05,
+    vjust = 1.5,
+    size = 4.2,
+    fontface = "bold"
+  ) +
+
+  # -------------------------------------------------------
+  # Theme
+  # -------------------------------------------------------
+  theme_classic(
+    base_size = 14
+  ) +
+
+  theme(
+    axis.title.x = element_text(
+      size = 15,
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      size = 15,
+      face = "bold"
+    ),
+    axis.text = element_text(
+      size = 12
+    ),
+    legend.title = element_text(
+      size = 13,
+      face = "bold"
+    ),
+    legend.text = element_text(
+      size = 12
+    ),
+    legend.position = "right"
+  )
+
+# ---------------------------------------------------------
+# 14. Print
+# ---------------------------------------------------------
+
+p_pcoa_plasma
+
+```
+
+
+
+
+
+
+#Creation of meta_pspp cross-compatmental
+
+```{r}
+
+rownames(meta_389_3clust_Pooled_PP_80perc) <- meta_389_3clust_Pooled_PP_80perc$X
+meta_389_3clust_Pooled_PP_80perc$X <- NULL
+
+
+rownames(meta_389_3clust_Pooled_PS_80perc) <- meta_389_3clust_Pooled_PS_80perc$X
+meta_389_3clust_Pooled_PS_80perc$X <- NULL
+
+
+#pooled concodance
+table(meta_389_3clust_Pooled_SP_80perc$Mclust_cluster, meta_389_3clust_Pooled_PP_80perc$Mclust_cluster)
+table(meta_389_3clust_Pooled_SP_80perc$Mclust_cluster, meta_389_3clust_Pooled_PP_80perc$Mclust_cluster)
+
+table(meta_389_3clust_Pooled_SP_80perc$Mclust_cluster, meta_389_3clust_Pooled_PP_80perc$Mclust_cluster, meta_389_3clust_Pooled_PP_80perc$study_group)
+
+
+
+#
+meta_389_3clust_Pooled_SP_80perc$PS_cluster <- factor(meta_389_3clust_Pooled_SP_80perc$Mclust_cluster, levels = c("1", "2", "3"),
+                                                      labels = c("PS1", "PS2", "PS3"))
+
+meta_389_3clust_Pooled_PP_80perc$PP_cluster <- factor(meta_389_3clust_Pooled_PP_80perc$Mclust_cluster, levels = c("1", "2"),
+                                                      labels = c("PP1", "PP2"))
+
+table(meta_389_3clust_Pooled_SP_80perc$PS_cluster)
+table(meta_389_3clust_Pooled_PP_80perc$PP_cluster)
+
+meta_pspp <- meta_389_3clust_Pooled_SP_80perc
+
+meta_pspp$PSPP <- paste0(
+  meta_389_3clust_Pooled_SP_80perc$PS_cluster,
+  meta_389_3clust_Pooled_PP_80perc$PP_cluster
+)
+
+
+table(meta_pspp$PSPP)
+
+```
+
+
+
+
+# Cross compartmental phenotypes overall tests (chisq , fisher), propotions
+# 6 X 3 cross comp by study group
+```{r}
+
+# =========================================================
+# Cross-compartment phenotype × study group
+# =========================================================
+
+tab_pspp <- table(
+  meta_pspp$PSPP,
+  meta_pspp$study_group
+)
+
+print(tab_pspp)
+
+# ---------------------------------------------------------
+# Chi-square test
+# ---------------------------------------------------------
+
+chi_pspp <- chisq.test(tab_pspp)
+
+print(chi_pspp)
+
+# Expected counts
+print(chi_pspp$expected)
+
+
+# ---------------------------------------------------------
+# Fisher's exact test with Monte Carlo simulation
+# ---------------------------------------------------------
+
+set.seed(123)
+
+fisher_pspp <- fisher.test(
+  tab_pspp,
+  simulate.p.value = TRUE,
+  B = 100000
+)
+
+print(fisher_pspp)
+
+
+# ---------------------------------------------------------
+# Cramér's V
+# ---------------------------------------------------------
+
+library(rstatix)
+
+cramers_v_pspp <- cramers_v(tab_pspp)
+
+print(cramers_v_pspp)
+
+
+### calulate cramer's v directly
+# =========================================================
+# Cramér's V
+# =========================================================
+
+chi_sq <- chi_pspp$statistic
+n <- sum(tab_pspp)
+
+r <- nrow(tab_pspp)
+k <- ncol(tab_pspp)
+
+cramers_v_pspp <- sqrt(
+  as.numeric(chi_sq) / (n * min(r - 1, k - 1))
+)
+
+cramers_v_pspp
+
+
+# ---------------------------------------------------------
+# Row percentages
+# ---------------------------------------------------------
+
+row_percent_pspp <- round(
+  prop.table(tab_pspp, margin = 1) * 100,
+  1
+)
+
+print(row_percent_pspp)
+
+
+# ---------------------------------------------------------
+# Column percentages
+# ---------------------------------------------------------
+
+column_percent_pspp <- round(
+  prop.table(tab_pspp, margin = 2) * 100,
+  1
+)
+
+print(column_percent_pspp)
+
+```
+
+### PS3PP2 logistic regression 
+
+```{r}
+# =========================================================
+# PS3PP2 enrichment by HIV exposure/infection group
+# =========================================================
+
+meta_pspp <- meta_pspp %>%
+  mutate(
+    PS3PP2_binary = ifelse(PSPP == "PS3PP2", "PS3PP2", "Other"),
+    PS3PP2_binary = factor(
+      PS3PP2_binary,
+      levels = c("Other", "PS3PP2")
+    ),
+    study_group = factor(
+      study_group,
+      levels = c("HUU", "HEU", "HI")
+    )
+  )
+
+# ---------------------------------------------------------
+# 1. Cross-tabulation
+# ---------------------------------------------------------
+
+tab_PS3PP2 <- table(
+  meta_pspp$PS3PP2_binary,
+  meta_pspp$study_group
+)
+
+print(tab_PS3PP2)
+
+
+# ---------------------------------------------------------
+# 2. Column percentages
+#    = proportion of each study group that is PS3PP2
+# ---------------------------------------------------------
+
+PS3PP2_percent <- round(
+  prop.table(tab_PS3PP2, margin = 2) * 100,
+  1
+)
+
+print(PS3PP2_percent)
+
+
+# ---------------------------------------------------------
+# 3. Overall test
+# ---------------------------------------------------------
+
+fisher_PS3PP2 <- fisher.test(
+  tab_PS3PP2,
+  simulate.p.value = TRUE,
+  B = 100000
+)
+
+print(fisher_PS3PP2)
+
+
+# ---------------------------------------------------------
+# 4. Logistic regression
+#    Outcome = PS3PP2 vs Other
+#    Reference = HUU
+# ---------------------------------------------------------
+
+fit_PS3PP2 <- glm(
+  PS3PP2_binary ~ study_group +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_pspp
+)
+
+summary(fit_PS3PP2)
+
+
+# ---------------------------------------------------------
+# 5. Odds ratios and 95% CI
+# ---------------------------------------------------------
+
+results_PS3PP2 <- broom::tidy(
+  fit_PS3PP2,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^study_group", term)) %>%
+  transmute(
+    comparison = term,
+    OR = estimate,
+    CI_low = conf.low,
+    CI_high = conf.high,
+    p = p.value
+  ) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+print(results_PS3PP2)
+
+```
+
+
+
+
+# Odds of  PS3PP2 membership  all 3 study_group comparisons (logistic regression)
+```{r}
+# =========================================================
+# PS3PP2 vs Other
+# All 3 study-group comparisons
+# Adjusted for age and sex
+# =========================================================
+
+# ---------------------------------------------------------
+# Reference = HUU
+# Gives: HEU vs HUU and HI vs HUU
+# ---------------------------------------------------------
+
+meta_ref_HUU <- meta_pspp %>%
+  mutate(
+    study_group = relevel(
+      factor(study_group),
+      ref = "HUU"
+    )
+  )
+
+fit_HUU <- glm(
+  PS3PP2_binary ~ study_group +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_ref_HUU
+)
+
+res_HUU <- broom::tidy(
+  fit_HUU,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^study_group", term))
+
+
+# ---------------------------------------------------------
+# Reference = HEU
+# Gives: HUU vs HEU and HI vs HEU
+# ---------------------------------------------------------
+
+meta_ref_HEU <- meta_pspp %>%
+  mutate(
+    study_group = relevel(
+      factor(study_group),
+      ref = "HEU"
+    )
+  )
+
+fit_HEU <- glm(
+  PS3PP2_binary ~ study_group +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_ref_HEU
+)
+
+res_HEU <- broom::tidy(
+  fit_HEU,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^study_group", term))
+
+
+# ---------------------------------------------------------
+# Extract the 3 unique comparisons
+# ---------------------------------------------------------
+
+results_PS3PP2_3 <- bind_rows(
+
+  # HEU vs HUU
+  res_HUU %>%
+    filter(term == "study_groupHEU") %>%
+    transmute(
+      comparison = "HEU vs HUU",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # HI vs HUU
+  res_HUU %>%
+    filter(term == "study_groupHI") %>%
+    transmute(
+      comparison = "HI vs HUU",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    ),
+
+  # HI vs HEU
+  res_HEU %>%
+    filter(term == "study_groupHI") %>%
+    transmute(
+      comparison = "HI vs HEU",
+      OR = estimate,
+      CI_low = conf.low,
+      CI_high = conf.high,
+      p = p.value
+    )
+) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  )
+
+print(results_PS3PP2_3)
+
+```
+
+
+
+# clinical caries association with PSPP 4
+
+```{r}
+# Clinical association with pooled oral-systemic immune phenotypes
+# Reference = PS3PP2
+
+library(dplyr)
+library(broom)
+
+# ---------------------------------------------------------
+# Pooled analysis: four PSPP phenotypes
+# ---------------------------------------------------------
+
+#meta_pooled <- meta_pspp_4
+
+
+# =========================================================
+# Set PS3PP2 as reference
+# Gives comparisons:
+# PS1PP1 vs PS3PP2
+# PS1PP2 vs PS3PP2
+# PS2PP1 vs PS3PP2
+# =========================================================
+
+meta_pooled_ref <- meta_pspp_4 %>%
+  mutate(
+    PSPP = relevel(
+      factor(PSPP),
+      ref = "PS3PP2"
+    )
+  )
+
+
+# =========================================================
+# Logistic regression
+# =========================================================
+
+fit_pspp <- glm(
+  caries_IL ~ PSPP +
+    study_group +
+    host_age +
+    host_sex,
+  family = binomial,
+  data = meta_pooled_ref
+)
+
+
+summary(fit_pspp)
+
+# =========================================================
+# Extract PSPP comparisons
+# =========================================================
+
+results_pspp <- broom::tidy(
+  fit_pspp,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(grepl("^PSPP", term)) %>%
+  mutate(
+    comparison = case_when(
+      term == "PSPPPS1PP1" ~ "PS1PP1 vs PS3PP2",
+      term == "PSPPPS1PP2" ~ "PS1PP2 vs PS3PP2",
+      term == "PSPPPS2PP1" ~ "PS2PP1 vs PS3PP2",
+      TRUE ~ term
+    )
+  ) %>%
+  transmute(
+    comparison,
+    OR = estimate,
+    CI_low = conf.low,
+    CI_high = conf.high,
+    p = p.value
+  ) %>%
+  mutate(
+    q = p.adjust(p, method = "BH")
+  ) %>%
+  arrange(q)
+
+results_pspp
+
+```
+
+
+
+
+
+#Community composition in cross-compartmental phenotypes Pairwise PERMANOVA of Bray-Curtis beta diversity adjusted for HIV group , age and sex
+# cross compartmental pooled all 6 saliva-plasma combinations
+
+```{r}
+
+# pooled bray cross compartmental
+
+library(phyloseq)
+library(vegan)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# ================================
+# Match metadata to phyloseq samples
+# ================================
+meta <- meta_pspp[sample_names(physeq_all_389), , drop = FALSE]
+sample_data(physeq_all_389) <- sample_data(meta)
+
+physeq_all_389
+
+# ================================
+# Bray-Curtis + PCoA
+# ================================
+bray <- phyloseq::distance(
+  physeq_all_389,
+  method = "bray"
+)
+
+pcoa_bray <- ordinate(
+  physeq_all_389,
+  method = "PCoA",
+  distance = bray
+)
+
+# PCoA plot colored by PSPP
+p_bray <- plot_ordination(
+  physeq_all_389,
+  pcoa_bray,
+  color = "PSPP"
+) +
+  geom_point(size = 3, alpha = 0.75) +
+  stat_ellipse(
+    aes(color = PSPP),
+    type = "t",
+    linewidth = 0.8,
+    level = 0.95
+  ) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Bray-Curtis PCoA",
+    color = "PS-PP cluster"
+  )
+
+print(p_bray)
+
+
+# ================================
+# Overall PERMANOVA
+# Bray ~ PSPP + host_age + host_sex
+# ================================
+meta_adonis <- data.frame(sample_data(physeq_all_389))
+
+meta_adonis$PSPP <- factor(meta_adonis$PSPP)
+meta_adonis$host_sex <- factor(meta_adonis$host_sex)
+meta_adonis$host_age <- as.numeric(meta_adonis$host_age)
+
+set.seed(123)
+adonis_bray <- adonis2(
+  bray ~ PSPP + study_group  + host_age + host_sex ,
+  data = meta_adonis,
+  permutations = 9999,
+  by = "margin"
+)
+
+print(adonis_bray)
+
+## BH for overall PERMANOVA
+
+# Extract marginal tests and BH-adjust P-values
+adonis_table <- as.data.frame(adonis_bray)
+
+# BH correction across model terms
+adonis_table$q_value <- NA_real_
+
+# Exclude Residual and Total rows
+test_rows <- !(rownames(adonis_table) %in% c("Residual", "Total"))
+
+adonis_table$q_value[test_rows] <- p.adjust(
+  adonis_table$`Pr(>F)`[test_rows],
+  method = "BH"
+)
+
+# Round for presentation
+adonis_table$`P-value` <- adonis_table$`Pr(>F)`
+adonis_table$`q-value` <- adonis_table$q_value
+
+adonis_table <- adonis_table[
+  test_rows,
+  c("Df", "SumOfSqs", "R2", "F", "P-value", "q-value")
+]
+
+adonis_table
+
+
+# ================================
+# Pairwise PERMANOVA for PSPP
+# Adjusted for host_age + host_sex
+# ================================
+
+pspp_levels <- levels(droplevels(meta_adonis$PSPP))
+
+pairwise_results <- lapply(
+  combn(pspp_levels, 2, simplify = FALSE),
+  function(groups) {
+    
+    keep <- meta_adonis$PSPP %in% groups
+    
+    meta_pair <- droplevels(meta_adonis[keep, , drop = FALSE])
+    bray_pair <- as.dist(as.matrix(bray)[keep, keep])
+    
+    set.seed(123)
+    result <- adonis2(
+      bray_pair ~ PSPP + study_group + host_age + host_sex,
+      data = meta_pair,
+      permutations = 9999,
+      by = "margin"
+    )
+    
+    data.frame(
+      group1 = groups[1],
+      group2 = groups[2],
+      n1 = sum(meta_pair$PSPP == groups[1]),
+      n2 = sum(meta_pair$PSPP == groups[2]),
+      R2 = result["PSPP", "R2"],
+      F = result["PSPP", "F"],
+      p = result["PSPP", "Pr(>F)"]
+    )
+  }
+) %>%
+  bind_rows() %>%
+  mutate(
+    p_adj = p.adjust(p, method = "BH")
+  ) %>%
+  arrange(p_adj)
+
+print(pairwise_results)
+
+
+# ================================
+# Homogeneity of dispersion
+# ================================
+disp_pspp <- betadisper(
+  bray,
+  meta_adonis$PSPP
+)
+
+print(anova(disp_pspp))
+
+print(
+  permutest(
+    disp_pspp,
+    permutations = 999
+  )
+)
+
+```
+
+
+
+
+
+# Bray PSPP 4 
+```{r}
+# =========================================================
+# PCoA: Cross-compartmental immune phenotypes
+# Bray-Curtis + centroids + spider lines + 95% ellipses
+# =========================================================
+
+library(phyloseq)
+library(vegan)
+library(ggplot2)
+library(dplyr)
+
+# =========================================================
+# 1. Define phenotypes to include
+# =========================================================
+
+pspp_keep <- c(
+  "PS1PP1",
+  "PS1PP2",
+  "PS2PP1",
+  "PS3PP2"
+)
+
+# =========================================================
+# 2. Adjustable colors
+# =========================================================
+
+pspp_colors <- c(
+  "PS1PP1" = "#D73027",
+  "PS1PP2" = "#2C7BB6",
+  "PS2PP1" = "#1B9E77",
+  "PS3PP2" = "#FDAE61"
+)
+
+# =========================================================
+# 3. Subset phyloseq object
+# =========================================================
+
+physeq_pspp4 <- subset_samples(
+  physeq_all_389,
+  PSPP %in% pspp_keep
+)
+
+# Remove taxa absent after subsetting
+physeq_pspp4 <- prune_taxa(
+  taxa_sums(physeq_pspp4) > 0,
+  physeq_pspp4
+)
+
+# Make PSPP a factor
+sample_data(physeq_pspp4)$PSPP <- factor(
+  sample_data(physeq_pspp4)$PSPP,
+  levels = pspp_keep
+)
+
+# Check sample numbers
+table(
+  sample_data(physeq_pspp4)$PSPP
+)
+
+# =========================================================
+# 4. Bray-Curtis distance
+# =========================================================
+
+bray_4 <- phyloseq::distance(
+  physeq_pspp4,
+  method = "bray"
+)
+
+# =========================================================
+# 5. PCoA
+# =========================================================
+
+pcoa_bray_4 <- ordinate(
+  physeq_pspp4,
+  method = "PCoA",
+  distance = bray_4
+)
+
+# =========================================================
+# 6. Extract PCoA coordinates
+# =========================================================
+
+pcoa_coords <- as.data.frame(
+  pcoa_bray_4$vectors[, 1:2]
+)
+
+pcoa_coords$Sample <- rownames(pcoa_coords)
+
+colnames(pcoa_coords)[1:2] <- c(
+  "PCoA1",
+  "PCoA2"
+)
+
+# =========================================================
+# 7. Add metadata
+# =========================================================
+
+meta_4 <- data.frame(
+  sample_data(physeq_pspp4)
+)
+
+meta_4$Sample <- rownames(meta_4)
+
+pcoa_df <- left_join(
+  pcoa_coords,
+  meta_4,
+  by = "Sample"
+)
+
+# Ensure phenotype ordering
+pcoa_df$PSPP <- factor(
+  pcoa_df$PSPP,
+  levels = pspp_keep
+)
+
+# =========================================================
+# 8. Variance explained
+# =========================================================
+
+eig <- pcoa_bray_4$values$Eigenvalues
+
+pc1_var <- round(
+  100 * eig[1] / sum(eig[eig > 0]),
+  1
+)
+
+pc2_var <- round(
+  100 * eig[2] / sum(eig[eig > 0]),
+  1
+)
+
+# =========================================================
+# 9. Calculate phenotype centroids
+# =========================================================
+
+centroids <- pcoa_df %>%
+  group_by(PSPP) %>%
+  summarise(
+    PCoA1 = mean(PCoA1, na.rm = TRUE),
+    PCoA2 = mean(PCoA2, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# =========================================================
+# 10. PCoA plot
+# =========================================================
+
+p_bray_4 <- ggplot(
+  pcoa_df,
+  aes(
+    x = PCoA1,
+    y = PCoA2,
+    color = PSPP
+  )
+) +
+
+  # -------------------------------------------------------
+  # Spider lines: samples → phenotype centroid
+  # -------------------------------------------------------
+
+  geom_segment(
+    data = pcoa_df %>%
+      left_join(
+        centroids,
+        by = "PSPP",
+        suffix = c("", "_centroid")
+      ),
+    aes(
+      xend = PCoA1_centroid,
+      yend = PCoA2_centroid,
+      color = PSPP
+    ),
+    linewidth = 0.35,
+    alpha = 0.25
+  ) +
+
+  # -------------------------------------------------------
+  # 95% confidence ellipses
+  # -------------------------------------------------------
+
+  stat_ellipse(
+    aes(
+      group = PSPP
+    ),
+    type = "t",
+    level = 0.95,
+    linewidth = 0.9,
+    alpha = 0.8
+  ) +
+
+  # -------------------------------------------------------
+  # Sample points
+  # -------------------------------------------------------
+
+  geom_point(
+    size = 3.2,
+    alpha = 0.75
+  ) +
+
+  # -------------------------------------------------------
+  # Centroids
+  # -------------------------------------------------------
+
+  geom_point(
+    data = centroids,
+    aes(
+      x = PCoA1,
+      y = PCoA2,
+      fill = PSPP
+    ),
+    shape = 23,
+    size = 5,
+    color = "black",
+    stroke = 0.8
+  ) +
+
+  # -------------------------------------------------------
+  # Centroid labels
+  # -------------------------------------------------------
+
+  geom_text(
+    data = centroids,
+    aes(
+      x = PCoA1,
+      y = PCoA2,
+      label = PSPP
+    ),
+    color = "black",
+    fontface = "bold",
+    size = 4,
+    vjust = -1.2
+  ) +
+
+  # -------------------------------------------------------
+  # Adjustable colors
+  # -------------------------------------------------------
+
+  scale_color_manual(
+    values = pspp_colors,
+    name = "PS–PP Phenotype"
+  ) +
+
+  scale_fill_manual(
+    values = pspp_colors,
+    guide = "none"
+  ) +
+
+  # -------------------------------------------------------
+  # Axis labels
+  # -------------------------------------------------------
+
+  labs(
+    x = paste0(
+      "PCoA1 (",
+      pc1_var,
+      "%)"
+    ),
+    y = paste0(
+      "PCoA2 (",
+      pc2_var,
+      "%)"
+    )
+  ) +
+
+  # -------------------------------------------------------
+  # Theme
+  # -------------------------------------------------------
+
+  theme_classic(
+    base_size = 14
+  ) +
+
+  theme(
+    axis.title.x = element_text(
+      size = 15,
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      size = 15,
+      face = "bold"
+    ),
+    axis.text = element_text(
+      size = 12
+    ),
+    legend.title = element_text(
+      size = 13,
+      face = "bold"
+    ),
+    legend.text = element_text(
+      size = 12
+    ),
+    legend.position = "right"
+  )
+
+# =========================================================
+# 11. Print plot
+# =========================================================
+
+p_bray_4
+```
+
+
+
+
+
+
+#ANCOMBC Differential abundant taxa associated with the 4 distinct communities of cross-compartmental immune phenotypes
+
+```{r}
+
+
+# ---------------------------------------------------------
+# 6. RUN ANCOM-BC2
+# ---------------------------------------------------------
+
+sample_data(physeq_pspp4)$PSPP <- relevel(
+  factor(sample_data(physeq_pspp4)$PSPP),
+  ref = "PS3PP2"
+)
+
+
+# =========================================================
+# Filter ASVs by prevalence
+# =========================================================
+
+
+ancom_res_PS1 <- ancombc2(
+  
+  data = physeq_pspp4 ,
+  #data = physeq_linda_filt_4 ,
+  
+  fix_formula ="PSPP + study_group + caries_IL + host_age + host_sex",
+  group = "PSPP",
+  rand_formula = NULL,
+  
+  tax_level = "Species",
+  
+  p_adj_method = "BH",
+  
+  pseudo_sens = TRUE,
+  
+  s0_perc = 0.05,
+  
+  struc_zero = FALSE,
+  
+  neg_lb = FALSE,
+  
+  alpha = 0.05,
+  
+  iter_control = list(
+    tol = 1e-5,
+    max_iter = 100,
+    verbose = TRUE
+  ),
+  
+  em_control = list(
+    tol = 1e-5,
+    max_iter = 100
+  ),
+  
+  lme_control = lme4::lmerControl(),
+  
+  mdfdr_control = list(
+    fwer_ctrl_method = "BH",
+    B = 1
+  ),
+  
+  global = TRUE,
+  
+  pairwise = TRUE,
+  
+  dunnet = TRUE,
+  
+  trend = FALSE,
+  
+  verbose = TRUE,
+  
+  n_cl = 2
+)
+
+```
+
+
+
+# Extract results
+```{r}
+
+library(dplyr)
+
+all_pairs_results <- ancom_res_PS1$res_pair
+
+# ---------------------------------------------------------
+# PS1PP1 vs PS3PP2
+# ---------------------------------------------------------
+
+
+PS1PP1_vs_PS3PP2 <- all_pairs_results %>%
+  dplyr::select(
+    taxon,
+     lfc_PSPPPS1PP1,
+     p_PSPPPS1PP1,
+    q_PSPPPS1PP1,
+    passed_ss_PSPPPS1PP1,
+    se_PSPPPS1PP1
+  ) %>%
+  filter(q_PSPPPS1PP1 < 0.10) %>%
+  arrange(lfc_PSPPPS1PP1)
+
+colnames(PS1PP1_vs_PS3PP2)
+
+# ---------------------------------------------------------
+# PS1PP2 vs PS3PP2
+# ---------------------------------------------------------
+
+PS1PP2_vs_PS3PP2 <- all_pairs_results %>% dplyr::select(
+      taxon, lfc_PSPPPS1PP2, p_PSPPPS1PP2,q_PSPPPS1PP2,se_PSPPPS1PP2,
+      passed_ss_PSPPPS1PP2) %>%
+    filter(q_PSPPPS1PP2 < 0.10) %>% arrange(lfc_PSPPPS1PP2)
+
+  PS1PP2_vs_PS3PP2 
+  
+# ---------------------------------------------------------
+# PS2PP1 vs PS3PP2
+# ---------------------------------------------------------
+
+  PS2PP1_vs_PS3PP2 <- all_pairs_results %>%
+    dplyr::select(
+      taxon,
+      lfc_PSPPPS2PP1,
+     p_PSPPPS2PP1,
+      q_PSPPPS2PP1,
+      passed_ss_PSPPPS2PP1,
+     se_PSPPPS2PP1
+    ) %>%
+    filter(q_PSPPPS2PP1 < 0.10) %>%
+    arrange(lfc_PSPPPS2PP1)
+  
+  PS2PP1_vs_PS3PP2
+  
+# ---------------------------------------------------------
+# PS1PP2 vs PS2PP1
+# ---------------------------------------------------------
+
+PS1PP2_vs_PS2PP1 <- all_pairs_results %>%
+  dplyr::select(
+    taxon,
+    lfc = lfc_PSPPPS1PP2_PSPPPS2PP1,
+    p = p_PSPPPS1PP2_PSPPPS2PP1,
+    q = q_PSPPPS1PP2_PSPPPS2PP1,
+    passed_ss = passed_ss_PSPPPS1PP2_PSPPPS2PP1
+  ) %>%
+  filter(q < 0.10) %>%
+  arrange(q)
+
+PS1PP2_vs_PS2PP1
+
+# ---------------------------------------------------------
+# PS1PP2 vs PS1PP1
+# ---------------------------------------------------------
+
+PS1PP2_vs_PS1PP1 <- all_pairs_results %>%
+  dplyr::select(
+    taxon,
+    lfc = lfc_PSPPPS1PP2_PSPPPS1PP1,
+    p = p_PSPPPS1PP2_PSPPPS1PP1,
+    q = q_PSPPPS1PP2_PSPPPS1PP1,
+    passed_ss = passed_ss_PSPPPS1PP2_PSPPPS1PP1
+  ) %>%
+  filter(q < 0.10) %>%
+  arrange(q)
+
+PS1PP2_vs_PS1PP1
+ 
+
+```
+
+
+
+# Forest
+
+```{r}
+#### Forest plot
+
+#Forest plots
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(forcats)
+
+# ---- Prepare data ----
+df_forest <- res_group_PS1PP2vsPS3PP2 %>%
+  mutate(
+    
+    # Direction of association
+    color_group = case_when(
+      lfc_PSPPPS1PP2 < 0 ~ "PS3PP2",
+      TRUE ~ "PS1PP2",
+    ),
+    
+    # Clean taxon names
+    feature = taxon %>%
+      str_replace_all("_", " ") %>%
+      str_replace_all("\\bsp\\.\\b", "sp.") %>%
+      str_remove("\\s+(ATCC|DSM|str\\.|F|CS)\\s*\\d+") %>%
+      str_remove("\\s+unknown$") %>%
+      str_replace("^([A-Z][a-z]+) unknown$", "\\1 sp.") %>%
+      str_replace("sp\\. oral taxon (\\d+).*", "sp. oral taxon \\1") %>%
+      str_squish()
+  )
+
+# ---- Add 95% CI ----
+df_forest <- df_forest %>%
+  mutate(
+    CI_low  = lfc_PSPPPS1PP2 - 1.96 * se_PSPPPS1PP2,
+    CI_high = lfc_PSPPPS1PP2 + 1.96 * se_PSPPPS1PP2
+  )
+
+# ---- Keep taxa meeting plotting criteria ----
+df_forest_plot <- df_forest %>%
+  filter(
+    q_PSPPPS1PP2 < 0.1,
+    passed_ss_PSPPPS1PP2 == TRUE
+  ) %>%
+  arrange(lfc_PSPPPS1PP2) %>%
+  mutate(
+    feature = factor(feature, levels = feature)
+  )
+
+# ---- Forest plot ----
+cf_forest_2_1 <- ggplot(
+  df_forest_plot,
+  aes(
+    x = lfc_PSPPPS1PP2,
+    y = feature,
+    color = color_group
+  )
+) +
+  
+  # Confidence intervals
+  geom_errorbarh(
+    aes(
+      xmin = CI_low,
+      xmax = CI_high
+    ),
+    height = 0.2,
+    linewidth = 0.8
+  ) +
+  
+  # Point estimate
+  geom_point(
+    size = 3.5
+  ) +
+  
+  # Reference line
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  
+  # Colors
+  scale_color_manual(
+    values = c(
+      "PS1PP2" = "#2C7BB6", #"#009E73",
+      "PS3PP2" = "#FDAE61"
+      
+    )
+  ) +
+  
+  # Labels
+  labs(
+    x = "Effect Size (Coefficient)",
+    y = NULL,
+    color = "Oral-systemic Immune Phenotype"
+  ) +
+  
+  # Theme
+  theme_classic() +
+  theme(
+    legend.position = "top",
+    legend.text = element_text(
+      size = 12
+    ),
+    legend.title = element_text(
+      size = 12,
+      face = "bold"
+    ),
+    axis.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.text.y = element_text(
+      size = 12,
+      face = "italic"
+    ),
+    axis.title.x = element_text(
+      size = 14,
+      face = "bold"
+    )
+  )
+
+# ---- Plot ----
+cf_forest_2_1
+
+
+```
+
+
+#Forest PS1PP2 vs PS3PP2
+```{r}
+
+# =========================================================
+# Forest plot: PS1PP2 vs PS3PP2
+# =========================================================
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+# ---------------------------------------------------------
+# Prepare data
+# ---------------------------------------------------------
+
+df_forest <- PS1PP2_vs_PS3PP2  %>%
+  mutate(
+    
+    # Direction of association
+    color_group = case_when(
+      lfc_PSPPPS1PP2 < 0 ~ "PS3PP2",
+      TRUE ~ "PS1PP2"
+    ),
+    
+    # Clean taxon names
+    feature = taxon %>%
+      str_replace_all("_", " ") %>%
+      str_replace_all("\\bsp\\.\\b", "sp.") %>%
+      str_remove("\\s+(ATCC|DSM|str\\.|F|CS)\\s*\\d+") %>%
+      str_remove("\\s+unknown$") %>%
+      str_replace(
+        "^([A-Z][a-z]+) unknown$",
+        "\\1 sp."
+      ) %>%
+      str_replace(
+        "sp\\. oral taxon (\\d+).*",
+        "sp. oral taxon \\1"
+      ) %>%
+      str_squish()
+  )
+
+# ---------------------------------------------------------
+# Calculate 95% confidence intervals
+# ---------------------------------------------------------
+
+df_forest <- df_forest %>%
+  mutate(
+    CI_low = lfc_PSPPPS1PP2 -
+      1.96 * se_PSPPPS1PP2,
+    
+    CI_high = lfc_PSPPPS1PP2 +
+      1.96 * se_PSPPPS1PP2
+  )
+
+# ---------------------------------------------------------
+# Keep taxa meeting plotting criteria
+# ---------------------------------------------------------
+
+df_forest_plot <- df_forest %>%
+  filter(
+    q_PSPPPS1PP2 < 0.10#,
+    #passed_ss_PSPPPS1PP2 == TRUE
+  ) %>%
+  arrange(lfc_PSPPPS1PP2) %>%
+  mutate(
+    feature = factor(feature, levels = feature)
+  )
+
+# ---------------------------------------------------------
+# Forest plot
+# ---------------------------------------------------------
+
+cf_forest_PS1PP2_vs_PS3PP2 <- ggplot(
+  df_forest_plot,
+  aes(
+    x = lfc_PSPPPS1PP2,
+    y = feature,
+    color = color_group
+  )
+) +
+  
+  # 95% confidence intervals
+  geom_errorbarh(
+    aes(
+      xmin = CI_low,
+      xmax = CI_high
+    ),
+    height = 0.2,
+    linewidth = 0.8
+  ) +
+  
+  # Point estimate
+  geom_point(
+    size = 3.5
+  ) +
+  
+  # Null effect
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  
+  # Colors
+  scale_color_manual(
+    values = c(
+      "PS1PP2" = "#2C7BB6",
+      "PS3PP2" = "#FDAE61"
+      
+      
+    )
+  ) +
+  
+  # Labels
+  labs(
+    x = "Log fold change",
+    y = NULL,
+    color = "Oral-systemic immune phenotype"
+  ) +
+  
+  # Theme
+  theme_classic() +
+  theme(
+    legend.position = "top",
+    legend.text = element_text(size = 12),
+    legend.title = element_text(
+      size = 12,
+      face = "bold"
+    ),
+    axis.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.text.y = element_text(
+      size = 14,
+      face = "italic"
+    ),
+    axis.title.x = element_text(
+      size = 14,
+      face = "bold"
+    )
+  )
+
+# ---------------------------------------------------------
+# Plot
+# ---------------------------------------------------------
+
+cf_forest_PS1PP2_vs_PS3PP2
+
+```
+
+
+# Forest PS1PP1 vs PS3PP2
+```{r}
+
+
+# =========================================================
+# Forest plot: PS1PP1 vs PS3PP2
+# =========================================================
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+# ---------------------------------------------------------
+# Prepare data
+# ---------------------------------------------------------
+
+df_forest <- PS1PP1_vs_PS3PP2 %>%
+  mutate(
+    
+    # Direction of association
+    color_group = case_when(
+      lfc_PSPPPS1PP1 < 0 ~ "PS3PP2",
+      TRUE ~ "PS1PP1"
+    ),
+    
+    # Clean taxon names
+    feature = taxon %>%
+      str_replace_all("_", " ") %>%
+      str_replace_all("\\bsp\\.\\b", "sp.") %>%
+      str_remove("\\s+(ATCC|DSM|str\\.|F|CS)\\s*\\d+") %>%
+      str_remove("\\s+unknown$") %>%
+      str_replace(
+        "^([A-Z][a-z]+) unknown$",
+        "\\1 sp."
+      ) %>%
+      str_replace(
+        "sp\\. oral taxon (\\d+).*",
+        "sp. oral taxon \\1"
+      ) %>%
+      str_squish()
+  )
+
+# ---------------------------------------------------------
+# Calculate 95% confidence intervals
+# ---------------------------------------------------------
+
+df_forest <- df_forest %>%
+  mutate(
+    CI_low = lfc_PSPPPS1PP1 -
+      1.96 * se_PSPPPS1PP1,
+    
+    CI_high = lfc_PSPPPS1PP1 +
+      1.96 * se_PSPPPS1PP1
+  )
+
+# ---------------------------------------------------------
+# Keep taxa meeting plotting criteria
+# ---------------------------------------------------------
+
+df_forest_plot <- df_forest %>%
+  filter(
+    q_PSPPPS1PP1 < 0.10 #,
+    #passed_ss_PSPPPS1PP1 == TRUE
+  ) %>%
+  arrange(lfc_PSPPPS1PP1) %>%
+  mutate(
+    feature = factor(feature, levels = feature)
+  )
+
+# ---------------------------------------------------------
+# Forest plot
+# ---------------------------------------------------------
+
+cf_forest_PS1PP1_vs_PS3PP2 <- ggplot(
+  df_forest_plot,
+  aes(
+    x = lfc_PSPPPS1PP1,
+    y = feature,
+    color = color_group
+  )
+) +
+  
+  # 95% confidence intervals
+  geom_errorbarh(
+    aes(
+      xmin = CI_low,
+      xmax = CI_high
+    ),
+    height = 0.2,
+    linewidth = 0.8
+  ) +
+  
+  # Point estimate
+  geom_point(
+    size = 3.5
+  ) +
+  
+  # Null effect
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  
+  # Colors
+  scale_color_manual(
+    values = c(
+      "PS1PP1" = "#D73027",
+      "PS3PP2" = "#FDAE61"
+    )
+  ) +
+  
+  # Labels
+  labs(
+    x = "Log fold change",
+    y = NULL,
+    color = "Oral-systemic immune phenotype"
+  ) +
+  
+  # Theme
+  theme_classic() +
+  theme(
+    legend.position = "top",
+    legend.text = element_text(size = 12),
+    legend.title = element_text(
+      size = 12,
+      face = "bold"
+    ),
+    axis.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.text.y = element_text(
+      size = 14,
+      face = "italic"
+    ),
+    axis.title.x = element_text(
+      size = 14,
+      face = "bold"
+    )
+  )
+
+# ---------------------------------------------------------
+# Plot
+# ---------------------------------------------------------
+
+cf_forest_PS1PP1_vs_PS3PP2
+
+```
+
+
+# Forest PS2PP1 vs PS3PP2
+```{r}
+
+
+# =========================================================
+# Forest plot: PS2PP1 vs PS3PP2
+# =========================================================
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+# ---------------------------------------------------------
+# Prepare data
+# ---------------------------------------------------------
+
+df_forest <- PS2PP1_vs_PS3PP2 %>%
+  mutate(
+    
+    # Direction of association
+    color_group = case_when(
+      lfc_PSPPPS2PP1 < 0 ~ "PS3PP2",
+      TRUE ~ "PS2PP1"
+    ),
+    
+    # Clean taxon names
+    feature = taxon %>%
+      str_replace_all("_", " ") %>%
+      str_replace_all("\\bsp\\.\\b", "sp.") %>%
+      str_remove("\\s+(ATCC|DSM|str\\.|F|CS)\\s*\\d+") %>%
+      str_remove("\\s+unknown$") %>%
+      str_replace(
+        "^([A-Z][a-z]+) unknown$",
+        "\\1 sp."
+      ) %>%
+      str_replace(
+        "sp\\. oral taxon (\\d+).*",
+        "sp. oral taxon \\1"
+      ) %>%
+      str_squish()
+  )
+
+# ---------------------------------------------------------
+# Calculate 95% confidence intervals
+# ---------------------------------------------------------
+
+df_forest <- df_forest %>%
+  mutate(
+    CI_low = lfc_PSPPPS2PP1 -
+      1.96 * se_PSPPPS2PP1,
+    
+    CI_high = lfc_PSPPPS2PP1 +
+      1.96 * se_PSPPPS2PP1
+  )
+
+# ---------------------------------------------------------
+# Keep taxa meeting plotting criteria
+# ---------------------------------------------------------
+
+df_forest_plot <- df_forest %>%
+  filter(
+    q_PSPPPS2PP1 < 0.10#,
+    #passed_ss_PSPPPS2PP1 == TRUE
+  ) %>%
+  arrange(lfc_PSPPPS2PP1) %>%
+  mutate(
+    feature = factor(feature, levels = feature)
+  )
+
+# ---------------------------------------------------------
+# Forest plot
+# ---------------------------------------------------------
+
+cf_forest_PS2PP1_vs_PS3PP2 <- ggplot(
+  df_forest_plot,
+  aes(
+    x = lfc_PSPPPS2PP1,
+    y = feature,
+    color = color_group
+  )
+) +
+  
+  # 95% confidence intervals
+  geom_errorbarh(
+    aes(
+      xmin = CI_low,
+      xmax = CI_high
+    ),
+    height = 0.2,
+    linewidth = 0.8
+  ) +
+  
+  # Point estimate
+  geom_point(
+    size = 3.5
+  ) +
+  
+  # Null effect
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  
+  # Colors
+  scale_color_manual(
+    values = c(
+      "PS2PP1" = "#1B9E77",
+      "PS3PP2" = "#FDAE61"
+      
+    )
+  ) +
+  
+  # Labels
+  labs(
+    x = "Log fold change",
+    y = NULL,
+    color = "Oral-systemic immune phenotype"
+  ) +
+  
+  # Theme
+  theme_classic() +
+  theme(
+    legend.position = "top",
+    legend.text = element_text(size = 12),
+    legend.title = element_text(
+      size = 12,
+      face = "bold"
+    ),
+    axis.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    axis.text.y = element_text(
+      size = 14,
+      face = "italic"
+    ),
+    axis.title.x = element_text(
+      size = 14,
+      face = "bold"
+    )
+  )
+
+# ---------------------------------------------------------
+# Plot
+# ---------------------------------------------------------
+
+cf_forest_PS2PP1_vs_PS3PP2
+
+```
+
